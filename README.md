@@ -18,7 +18,7 @@
 
 <p align="center">
   A <a href="https://www.home-assistant.io/">Home Assistant</a> custom integration for controlling scent and aroma diffusers via Bluetooth or WiFi.<br>
-  Supports devices using the <b>Aroma-Link</b> and <b>Aroma Buddy</b> apps.
+  Supports devices using the <b>Aroma-Link</b>, <b>Aroma Buddy</b> and <b>Scentiment</b> apps.
 </p>
 
 ---
@@ -46,6 +46,7 @@
 | AromaPlan Diffusers | Aroma-Link | BLE + Cloud | Same as Aroma-Link, different branding |
 | Crearoma Diffusers | Aroma-Link | BLE + Cloud | Same as Aroma-Link, different branding |
 | ShinePick QT-I300 | Aroma Buddy | BLE | Tuya BLE protocol |
+| Scentiment Diffuser Air 2 | Scentiment | BLE | JSON-over-BLE protocol; intensity, RGB LED, battery |
 
 ### Likely Compatible
 
@@ -110,16 +111,33 @@ Control your diffuser via the Aroma-Link cloud service. No Bluetooth required.
 
 ## &#x1F3AE; Entities
 
+The set of entities depends on which device family is connected.
+
+### Common to all devices
+
 | Entity | Type | Description |
 |--------|------|-------------|
 | Power | Switch | Turn diffuser on/off |
+| Status | Sensor | Current phase: spraying / paused / idle / off |
+
+### Aroma-Link / Tuya BLE
+
+| Entity | Type | Description |
+|--------|------|-------------|
 | Fan | Switch | Fan on/off (Aroma-Link, BLE only) |
 | Start Time | Time | Daily schedule start time |
 | End Time | Time | Daily schedule end time |
 | Work Duration | Number | Spray duration in seconds |
 | Pause Duration | Number | Pause between sprays in seconds |
-| Status | Sensor | Current phase: spraying / paused / idle / off |
 | Time Sync | Button | Manually sync the device clock to current local time (BLE only) |
+
+### Scentiment Diffuser Air 2
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| Level | Number | Spray intensity (1–3) |
+| LED | Light | RGB color picker + on/off |
+| Battery | Sensor | Battery percentage |
 
 ---
 
