@@ -10,7 +10,6 @@
   <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge" alt="HACS"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge" alt="License"></a>
   <a href="https://github.com/mr-sparks/scent-assistant/stargazers"><img src="https://img.shields.io/github/stars/mr-sparks/scent-assistant?style=for-the-badge" alt="Stars"></a>
-  <a href="https://github.com/mr-sparks/scent-assistant/releases"><img src="https://img.shields.io/github/downloads/mr-sparks/scent-assistant/total?style=for-the-badge" alt="Downloads"></a>
 </p>
 
 <p align="center">
