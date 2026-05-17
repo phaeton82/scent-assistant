@@ -91,6 +91,11 @@ class DiffuserState:
     device_name: str | None = None     # user-set device name (DP 6)
     password_required: bool | None = None  # GW device demands password auth
     firmware_version: str | None = None    # PCB+MCU version string
+    # Scent Marketing AK family — spray intensity bundled into schedule
+    # writes. Per @Mins95's captures the V2 firmware accepts 0-10 and the
+    # V3 firmware accepts 0-20; we clamp on send and let the AK protocol
+    # use this value as the LL field when (re)building schedule frames.
+    intensity: int | None = None
 
 
 @dataclass

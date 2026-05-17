@@ -490,6 +490,29 @@ class ScentDiffuserDevice:
             return True
         return False
 
+    async def set_intensity(self, intensity: int) -> bool:
+        """Set Scent Marketing AK spray intensity.
+
+        The AK protocol bundles intensity into schedule frames (no
+        dedicated opcode is known), so this stores the value locally and
+        the next schedule write will pick it up. The Number entity also
+        triggers a schedule re-write so the change takes effect
+        immediately even when the user doesn't separately touch a Start
+        Time / End Time entity.
+        """
+        if not isinstance(self._protocol, ScentMarketingAkProtocol):
+            return False
+        # Clamp to the firmware-accepted range. V2 caps at 10, V3 at 20.
+        max_value = 20 if self._protocol.is_v3 else 10
+        clamped = max(0, min(max_value, int(intensity)))
+        self._state.intensity = clamped
+        self._notify_state_changed()
+        # Push the current schedule with the new intensity so the change
+        # is observable on the device immediately.
+        if self._ble_address:
+            return await self._write_schedule_to_device()
+        return True
+
     async def set_rgb_color(self, r: int, g: int, b: int) -> bool:
         """Set Scentiment RGB LED color."""
         if not isinstance(self._protocol, ScentimentProtocol) or not self._ble_address:
@@ -579,7 +602,17 @@ class ScentDiffuserDevice:
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
                     enabled=enabled, work_seconds=work, pause_seconds=pause,
                 )
-                cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
+                # Pull intensity from state. Default to mid-range for the
+                # detected protocol version (V2 caps at 10, V3 at 20).
+                if self._state.intensity is not None:
+                    level = self._state.intensity
+                elif self._protocol.is_v3:
+                    level = 10
+                else:
+                    level = 6
+                cmd = self._protocol.build_schedule(
+                    slot, weekday_mask=weekday_mask, intensity=level,
+                )
 
             if cmd and await self._ble_execute(cmd):
                 self._notify_state_changed()
