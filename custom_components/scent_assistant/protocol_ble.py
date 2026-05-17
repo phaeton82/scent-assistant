@@ -616,17 +616,20 @@ class ScentMarketingAkProtocol(BleProtocol):
 
         Mirrors `TotalControlModel.writeTotalControl()`: 6-bit mask where
         bit 3 is reserved-always-1 and bits 5..0 are
-        lock|lamp|1|demo|fan|onOff. Pass `override_bit` to flip a single
-        bit relative to the cached on-device state.
+        lock|lamp|1|demo|fan|onOff. The override is persisted into
+        `_ctrl_bits` so consecutive HA toggles accumulate correctly —
+        without this, toggling lamp while power is on would emit a mask
+        with the power bit cleared, turning the diffuser off entirely.
+        Real device pushes (0x4D notifications) overwrite the cache when
+        they arrive.
         """
-        bits = dict(self._ctrl_bits)
         if override_bit is not None:
-            bits[override_bit] = override_value
+            self._ctrl_bits[override_bit] = override_value
         mask = (1 << SM_AK_CTRL_BIT_RESERVED)
         for bit in (SM_AK_CTRL_BIT_ONOFF, SM_AK_CTRL_BIT_FAN,
                     SM_AK_CTRL_BIT_DEMO, SM_AK_CTRL_BIT_LAMP,
                     SM_AK_CTRL_BIT_LOCK):
-            if bits.get(bit):
+            if self._ctrl_bits.get(bit):
                 mask |= 1 << bit
         return bytes([SM_AK_CMD_CONTROL_STATE, mask & 0xFF])
 

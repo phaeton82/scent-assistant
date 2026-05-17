@@ -224,13 +224,19 @@ class ScentDiffuserDevice:
                 await self._ble_client.connect()
                 self._ble_connected = True
 
-                # Subscribe to notifications for responses
+                # Subscribe to notifications for responses. Without these
+                # the AK family can't sync state back to HA, so a silent
+                # failure here is worth surfacing — bump it from debug to
+                # warning so it shows up in logs and diagnostics.
                 try:
                     await self._ble_client.start_notify(
                         self._protocol.notify_char_uuid, self._on_ble_notification
                     )
-                except Exception:
-                    _LOGGER.debug("Could not subscribe to notifications")
+                except Exception as err:
+                    _LOGGER.warning(
+                        "BLE start_notify failed on %s (%s): %s",
+                        self._ble_name, self._protocol.notify_char_uuid, err,
+                    )
 
                 # Scent Marketing AK family — PIN 8888 login must precede
                 # every other write, otherwise the device drops them
