@@ -282,6 +282,19 @@ class ScentDiffuserDevice:
                         if self._protocol.is_v3:
                             await self._ble_send(self._protocol.build_login_secondary_v3())
                             await asyncio.sleep(0.3)
+                        # Time sync must precede the read-back queries
+                        # on V3 devices — without it the firmware ACKs
+                        # the writes at the GATT layer but never pushes
+                        # the corresponding 4A/42/48/... responses. We
+                        # send on every connect (not gated by the
+                        # _ble_has_synced_time flag below) since each
+                        # AK session needs the device in a known time
+                        # state for reads to work.
+                        ak_time = self._protocol.build_time_sync()
+                        if ak_time:
+                            await self._ble_send(ak_time)
+                            await asyncio.sleep(0.2)
+                            self._ble_has_synced_time = True
                         # State read-back: fire queries; responses are
                         # parsed asynchronously by parse_notification.
                         for frame in self._protocol.build_read_schedule_queries():

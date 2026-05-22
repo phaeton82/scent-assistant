@@ -50,6 +50,19 @@ async def async_get_config_entry_diagnostics(
             "firmware_version": s.firmware_version,
             "work_seconds": s.work_seconds,
             "pause_seconds": s.pause_seconds,
+            # Scent Marketing AK read-back fields (populated by the
+            # 8301-8305 / C5 / CA01XX response parsers). Without these
+            # in the diagnostic output a reporter can't tell whether
+            # the device's stored schedule was actually read.
+            "intensity": s.intensity,
+            "weekday_mask": s.weekday_mask,
+            "schedule_slot": s.schedule_slot,
+            "start_hour": s.start_hour,
+            "start_minute": s.start_minute,
+            "end_hour": s.end_hour,
+            "end_minute": s.end_minute,
+            "device_label": s.device_label,
+            "model_code": s.model_code,
         }
 
     payload: dict[str, Any] = {

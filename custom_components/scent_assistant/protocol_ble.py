@@ -697,17 +697,25 @@ class ScentMarketingAkProtocol(BleProtocol):
         return SM_AK_HEARTBEAT_BYTES
 
     def build_time_sync(self, now: datetime | None = None) -> bytes | None:
-        """V2-style time sync, port of `BtDataModel.writeTime()`.
+        """Time sync command for the detected protocol version.
 
-        The V3 firmware uses a different 0x21-prefixed format that we
-        haven't decoded yet from the available captures; for V3 devices we
-        return None so the device manager skips auto-sync. The Time Sync
-        button still works as a connection-refresh trigger.
+        V2: `0x80 + YY MM DD HH MM SS WD` — port of `writeTime()` from
+        the decompiled Android app. @Mins95 confirmed this works on V2
+        devices.
+
+        V3: `0x21 0x03 + YY MM DD HH MM SS` — decoded from @Mins95's
+        salon_v3 capture (`21031A05140F351C` → 2026-05-20 15:53:28).
+        Empirically required *before* the V3 read opcodes (C5/C6/C7/...)
+        produce responses, otherwise the device silently ignores them.
         """
-        if self.is_v3:
-            return None
         if now is None:
             now = datetime.now()
+        if self.is_v3:
+            return bytes([
+                0x21, 0x03,
+                now.year % 100, now.month, now.day,
+                now.hour, now.minute, now.second,
+            ])
         return bytes([
             SM_AK_CMD_TIME_SYNC,
             now.year % 100, now.month, now.day,
