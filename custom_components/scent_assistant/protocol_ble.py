@@ -814,8 +814,13 @@ class ScentMarketingAkProtocol(BleProtocol):
         stops `set_schedule_enabled` / `set_intensity` from accidentally
         toggling the Fan switch off as a side effect.
 
-        SS = slot ID (04=weekend, 05=weekday in the official app),
-        EE = 01 enabled / 03 disabled. Trailer bytes are captured verbatim.
+        SS = slot ID (04=weekend, 05=weekday in the official app).
+        EE on write = 03 enable / 01 disable — confirmed by @Mins95's
+        2026-05-23 fresh capture of the official app toggling Program
+        ON from a clean disabled state. Earlier captures showing the
+        opposite were of a different action ("set as weekend pattern"
+        vs. "make this slot live"), not the Program switch toggle.
+        Trailer bytes are captured verbatim.
         """
         # Pick the slot that matches the typical weekend/weekday day-mask
         # pattern; default to the weekend slot for custom masks, since
@@ -824,7 +829,7 @@ class ScentMarketingAkProtocol(BleProtocol):
             slot_id = SM_AK_V3_SLOT_WEEKDAY
         else:
             slot_id = SM_AK_V3_SLOT_WEEKEND
-        state = 0x01 if slot.enabled else 0x03
+        state = 0x03 if slot.enabled else 0x01
         fan_byte = 0x03 if fan else 0x01
         head = bytes([
             SM_AK_CMD_SCHEDULE_V3, 0x01, 0x02, fan_byte,
@@ -948,18 +953,25 @@ class ScentMarketingAkProtocol(BleProtocol):
             # V2: `4D <mask>` (2 bytes). V3: `4D 01 <mask>` (3 bytes,
             # the 0x01 being a leading count/mode byte per @Mins95's V3
             # init capture where the app issues `C4` and receives
-            # `4D 01 FF`).
-            mask = data[2] & 0xFF if len(data) >= 3 else data[1] & 0xFF
+            # `4D 01 FF`). On V3 the mask is unreliable for fan/lamp —
+            # @Mins95 confirmed via differential capture that V3
+            # `4D 01 FF` reports all bits set regardless of actual
+            # state. So on V3 we only trust the ONOFF + LOCK bits and
+            # leave fan/lamp to the authoritative 4A schedule frame.
+            is_v3_frame = len(data) >= 3
+            mask = data[2] & 0xFF if is_v3_frame else data[1] & 0xFF
             self._ctrl_bits[SM_AK_CTRL_BIT_ONOFF] = bool(mask & (1 << SM_AK_CTRL_BIT_ONOFF))
-            self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = bool(mask & (1 << SM_AK_CTRL_BIT_FAN))
-            self._ctrl_bits[SM_AK_CTRL_BIT_DEMO] = bool(mask & (1 << SM_AK_CTRL_BIT_DEMO))
-            self._ctrl_bits[SM_AK_CTRL_BIT_LAMP] = bool(mask & (1 << SM_AK_CTRL_BIT_LAMP))
             self._ctrl_bits[SM_AK_CTRL_BIT_LOCK] = bool(mask & (1 << SM_AK_CTRL_BIT_LOCK))
             result["power"] = self._ctrl_bits[SM_AK_CTRL_BIT_ONOFF]
             result["phase"] = "idle" if result["power"] else "off"
-            result["fan"] = self._ctrl_bits[SM_AK_CTRL_BIT_FAN]
             result["lock"] = self._ctrl_bits[SM_AK_CTRL_BIT_LOCK]
-            result["light_on"] = self._ctrl_bits[SM_AK_CTRL_BIT_LAMP]
+            if not is_v3_frame:
+                # Legacy V2 path — bitmask is the source of truth.
+                self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = bool(mask & (1 << SM_AK_CTRL_BIT_FAN))
+                self._ctrl_bits[SM_AK_CTRL_BIT_DEMO] = bool(mask & (1 << SM_AK_CTRL_BIT_DEMO))
+                self._ctrl_bits[SM_AK_CTRL_BIT_LAMP] = bool(mask & (1 << SM_AK_CTRL_BIT_LAMP))
+                result["fan"] = self._ctrl_bits[SM_AK_CTRL_BIT_FAN]
+                result["light_on"] = self._ctrl_bits[SM_AK_CTRL_BIT_LAMP]
 
         elif op == 0x4B and len(data) >= 4:  # battery + oil-remaining
             result["battery"] = data[1] & 0xFF
