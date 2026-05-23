@@ -121,6 +121,12 @@ class DiffuserState:
     # V3-only model code (e.g. "A305M"). Useful for triage when
     # different hardware variants reveal protocol quirks.
     model_code: str | None = None
+    # Whether the device's active program/schedule is currently set to
+    # run. Distinct from `power` on V3 — a V3 diffuser can be powered
+    # on with the program disabled, in which case it won't spray even
+    # though Power+Fan look active. On V2 this duplicates `power`
+    # because V2 firmware only has the one toggle.
+    schedule_enabled: bool | None = None
 
 
 @dataclass
@@ -968,20 +974,22 @@ class ScentMarketingAkProtocol(BleProtocol):
                 # the only readable signal that the device is "on" is
                 # the enabled-slot bit. Mirror it into `state.power` so
                 # the HA Power switch reflects reality after restart.
+                # On V2 the schedule-enabled flag and power are the same
+                # concept, so populate both.
                 result["power"] = True
                 result["phase"] = "idle"
+                result["schedule_enabled"] = True
 
         elif op == SM_AK_RESP_SCHEDULE_V3 and len(data) >= 14:
             # V3 schedule slot read-back, response to C5 / CA01XX:
-            #     4A 01 02 03 04 SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
-            # The EE byte's semantics differ between write (0x01=on,
-            # 0x03=off) and read — @Mins95's salon_v3 capture shows the
-            # active slot 04 reporting EE=03 even though the program
-            # was enabled. So instead of trusting EE on read-back we
-            # rely on the structural check inside `_absorb_schedule`:
-            # a slot with all-zero times AND zero day mask is empty
-            # junk and gets skipped; anything else is treated as the
-            # active configuration.
+            #     4A 01 02 FF FE SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
+            # where FF (offset 3) carries the fan state and FE (offset
+            # 4) tracks whether the schedule is currently enabled.
+            # @Mins95's enabled/disabled comparison captures pinned this
+            # down: on-the-wire fan and program state are mirrored in
+            # the read-back, with read/write semantics for EE inverted
+            # (write: 01=enable / 03=disable; read: 03=enabled / 01=
+            # disabled).
             self._absorb_schedule(
                 slot_index=data[5],
                 start_hour=data[7], start_minute=data[8],
@@ -990,6 +998,16 @@ class ScentMarketingAkProtocol(BleProtocol):
                 intensity=data[13],
                 result=result,
             )
+            # V3 fan state is the authoritative source on read-back; it
+            # overrides whatever the 4D bitmask said (V3's 4D 01 FF
+            # reports all bits set regardless of actual fan state).
+            if data[3] in (0x01, 0x03):
+                result["fan"] = (data[3] == 0x03)
+            # V3 program-enabled flag — used by the dedicated Schedule
+            # switch entity that distinguishes "device is powered" from
+            # "program is currently running".
+            if data[6] in (0x01, 0x03):
+                result["schedule_enabled"] = (data[6] == 0x03)
 
         elif op == SM_AK_RESP_DEVICE_NAME_V3 and len(data) >= 2:
             # V3 reply to C6: `42 <utf8 name bytes…>`. Name is variable

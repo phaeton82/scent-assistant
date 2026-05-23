@@ -176,6 +176,19 @@ class ScentDiffuserDevice:
         return self._protocol.supports_fan()
 
     @property
+    def protocol_is_v3(self) -> bool:
+        """True when the AK protocol has identified the device as V3.
+
+        Stays False both for non-AK protocols and for AK devices whose
+        login response hasn't been parsed yet (i.e. before the first
+        successful BLE connect).
+        """
+        proto = self._protocol
+        if isinstance(proto, ScentMarketingAkProtocol):
+            return proto.is_v3
+        return False
+
+    @property
     def supports_cloud(self) -> bool:
         return self._cloud is not None and self._cloud_device_id is not None
 
@@ -472,6 +485,9 @@ class ScentDiffuserDevice:
         if "model_code" in updates:
             self._state.model_code = updates["model_code"]
             changed = True
+        if "schedule_enabled" in updates:
+            self._state.schedule_enabled = updates["schedule_enabled"]
+            changed = True
 
         if changed:
             self._notify_state_changed()
@@ -556,6 +572,30 @@ class ScentDiffuserDevice:
             return True
         return False
 
+    async def set_schedule_enabled(self, enabled: bool) -> bool:
+        """Enable or disable the active V3 schedule/program.
+
+        On V3 devices the program-enabled flag is a separate control
+        from Power: a V3 diffuser can be powered on with the program
+        disabled, in which case it won't spray. We re-apply the
+        currently cached schedule with the enabled bit flipped — same
+        approach as `set_intensity`, since there's no standalone
+        program-enable opcode in @Mins95's captures.
+
+        On V2 this method delegates to `set_power`, because V2's
+        firmware treats the schedule-enabled bit and the power
+        concept as the same toggle.
+        """
+        if not isinstance(self._protocol, ScentMarketingAkProtocol):
+            return False
+        if not self._protocol.is_v3:
+            return await self.set_power(enabled)
+        self._state.schedule_enabled = enabled
+        self._notify_state_changed()
+        if self._ble_address:
+            return await self._write_schedule_to_device(enabled=enabled)
+        return True
+
     async def set_intensity(self, intensity: int) -> bool:
         """Set Scent Marketing AK spray intensity.
 
@@ -632,8 +672,17 @@ class ScentDiffuserDevice:
 
         return await self._write_schedule_to_device(weekday_mask=weekday_mask, enabled=enabled)
 
-    async def _write_schedule_to_device(self, weekday_mask: int = 0x7F, enabled: bool = True) -> bool:
-        """Write the current schedule state to the device."""
+    async def _write_schedule_to_device(self, weekday_mask: int | None = None, enabled: bool = True) -> bool:
+        """Write the current schedule state to the device.
+
+        `weekday_mask=None` (the default for callers like `set_intensity`
+        or `set_schedule_enabled` that aren't changing the day pattern)
+        preserves whatever mask was last read back from the device, so a
+        one-axis tweak doesn't silently flatten an M-F schedule into
+        every-day.
+        """
+        if weekday_mask is None:
+            weekday_mask = self._state.weekday_mask if self._state.weekday_mask is not None else 0x7F
         work = self._state.work_seconds or DEFAULT_WORK_DURATION
         pause = self._state.pause_seconds or DEFAULT_PAUSE_DURATION
         s_h = self._state.start_hour

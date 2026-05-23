@@ -63,6 +63,7 @@ async def async_get_config_entry_diagnostics(
             "end_minute": s.end_minute,
             "device_label": s.device_label,
             "model_code": s.model_code,
+            "schedule_enabled": s.schedule_enabled,
         }
 
     payload: dict[str, Any] = {

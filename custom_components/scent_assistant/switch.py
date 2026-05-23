@@ -42,6 +42,12 @@ async def async_setup_entry(
             # without any extra protocol work.
             entities.append(DiffuserLampSwitch(device, entry))
             entities.append(DiffuserFanSwitch(device, entry))
+            # V3 AK devices have a separate program-enabled toggle that
+            # is distinct from Power. We register the entity for every
+            # AK device but make it unavailable on V2 (where it would
+            # just duplicate Power) — `available` checks `protocol.is_v3`
+            # which only resolves after the first BLE login.
+            entities.append(DiffuserScheduleSwitch(device, entry))
 
     async_add_entities(entities)
 
@@ -110,6 +116,47 @@ class DiffuserLockSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._device.set_lock(False)
+
+
+class DiffuserScheduleSwitch(SwitchEntity):
+    """Program / schedule enabled switch (Scent Marketing AK V3 only).
+
+    On V3 devices the program-enabled flag is independent of Power and
+    Fan — a diffuser can be powered on with the program disabled, in
+    which case it won't spray. On V2 devices the equivalent state is
+    already covered by the Power switch, so this entity stays
+    unavailable on V2 hardware.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Program"
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_schedule"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def is_on(self) -> bool | None:
+        return self._device.state.schedule_enabled
+
+    @property
+    def available(self) -> bool:
+        # V3-only: V2 devices have no separate program toggle.
+        return self._device.available and self._device.protocol_is_v3
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._device.set_schedule_enabled(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._device.set_schedule_enabled(False)
 
 
 class DiffuserLampSwitch(SwitchEntity):
