@@ -683,6 +683,11 @@ class ScentMarketingAkProtocol(BleProtocol):
         # have a dedicated 0x2A short frame. V2 devices keep using the
         # bitmask path.
         if self.is_v3:
+            # Optimistically cache the fan state so the next V3
+            # schedule write (Program toggle, intensity change, …)
+            # carries the correct fan byte at offset 3 instead of
+            # defaulting back to 0x01 and switching the fan off.
+            self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = on
             return SM_AK_V3_FAN_ON if on else SM_AK_V3_FAN_OFF
         return self._build_control(SM_AK_CTRL_BIT_FAN, on)
 
@@ -756,7 +761,10 @@ class ScentMarketingAkProtocol(BleProtocol):
         slot tied to weekday/weekend in the official app.
         """
         if self.is_v3:
-            return self._build_schedule_v3(slot, weekday_mask, intensity)
+            return self._build_schedule_v3(
+                slot, weekday_mask, intensity,
+                fan=self._ctrl_bits.get(SM_AK_CTRL_BIT_FAN, False),
+            )
         return self._build_schedule_v2(slot, weekday_mask, index, intensity)
 
     @staticmethod
@@ -792,10 +800,19 @@ class ScentMarketingAkProtocol(BleProtocol):
         slot: ScheduleSlot,
         weekday_mask: int,
         intensity: int,
+        fan: bool = False,
     ) -> bytes:
         """V3 schedule frame (18 bytes), matching @Mins95's captures:
 
-            2A 01 02 01 00 SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
+            2A 01 02 FF 00 SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
+
+        Where FF (offset 3) carries the fan state — 0x03 if the fan is
+        currently on, 0x01 otherwise. The schedule frame shares its
+        prefix with the V3 fan-only commands (`2A 01 02 01/03 00`), so
+        firmware reads offset 3 as the fan bit whether or not the rest
+        of a schedule follows. Embedding the current fan state here
+        stops `set_schedule_enabled` / `set_intensity` from accidentally
+        toggling the Fan switch off as a side effect.
 
         SS = slot ID (04=weekend, 05=weekday in the official app),
         EE = 01 enabled / 03 disabled. Trailer bytes are captured verbatim.
@@ -808,8 +825,9 @@ class ScentMarketingAkProtocol(BleProtocol):
         else:
             slot_id = SM_AK_V3_SLOT_WEEKEND
         state = 0x01 if slot.enabled else 0x03
+        fan_byte = 0x03 if fan else 0x01
         head = bytes([
-            SM_AK_CMD_SCHEDULE_V3, 0x01, 0x02, 0x01,
+            SM_AK_CMD_SCHEDULE_V3, 0x01, 0x02, fan_byte,
             0x00, slot_id,
             state,
             slot.start_hour & 0xFF,
@@ -1001,13 +1019,25 @@ class ScentMarketingAkProtocol(BleProtocol):
             # V3 fan state is the authoritative source on read-back; it
             # overrides whatever the 4D bitmask said (V3's 4D 01 FF
             # reports all bits set regardless of actual fan state).
+            # Mirror into _ctrl_bits so subsequent schedule writes embed
+            # the correct fan byte at offset 3.
             if data[3] in (0x01, 0x03):
-                result["fan"] = (data[3] == 0x03)
-            # V3 program-enabled flag — used by the dedicated Schedule
-            # switch entity that distinguishes "device is powered" from
-            # "program is currently running".
+                fan_now = data[3] == 0x03
+                result["fan"] = fan_now
+                self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = fan_now
+            # V3 program-enabled flag. Two bytes have to line up for
+            # the schedule to actually run on the device:
+            #   - data[4] = "active slot" indicator (slot ID when the
+            #     program is genuinely live, 0x00 otherwise)
+            #   - data[6] = EE on read (0x03 enabled, 0x01 disabled)
+            # @Mins95 observed beta.9 producing a "hybrid" state with
+            # EE=03 but active-slot=00 after HA-side toggles, which the
+            # device treats as not-actually-running. Require both bytes
+            # to align so HA's switch state reflects reality.
+            active_slot = data[4] != 0
+            ee_enabled = data[6] == 0x03
             if data[6] in (0x01, 0x03):
-                result["schedule_enabled"] = (data[6] == 0x03)
+                result["schedule_enabled"] = active_slot and ee_enabled
 
         elif op == SM_AK_RESP_DEVICE_NAME_V3 and len(data) >= 2:
             # V3 reply to C6: `42 <utf8 name bytes…>`. Name is variable
