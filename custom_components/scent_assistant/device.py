@@ -41,6 +41,13 @@ _LOGGER = logging.getLogger(__name__)
 
 # Disconnect BLE after this many seconds of inactivity
 BLE_IDLE_DISCONNECT_SECONDS = 10
+# Cooldown after a failed connect / write before we try again, so a
+# stuck device gets a chance to recover instead of being hammered.
+BLE_FAILURE_COOLDOWN_SECONDS = 3.0
+# bleak_retry_connector max-attempts. HA's bluetooth stack already
+# layers its own retries on top of ours, so keeping this low avoids
+# 6-8 rapid connect attempts that can wedge some firmwares.
+BLE_CONNECT_MAX_ATTEMPTS = 2
 
 
 class ScentDiffuserDevice:
@@ -75,9 +82,16 @@ class ScentDiffuserDevice:
         self._ble_name = ble_name or ""
         self._ble_client: BleakClient | None = None
         self._ble_connected = False
+        self._ble_notify_subscribed = False
         self._ble_lock = asyncio.Lock()
         self._ble_disconnect_task: asyncio.Task | None = None
         self._ble_has_synced_time = False
+        # Monotonic timestamp of the last failed BLE connect/write —
+        # used to back off after errors instead of hammering a stuck
+        # device (which can wedge a V3 diffuser's GATT stack badly
+        # enough that even the official app can't reconnect until a
+        # power cycle, per @Mins95's 2026-06-01 report).
+        self._ble_last_failure_ts: float = 0.0
 
         # Device type
         if device_type:
@@ -231,6 +245,19 @@ class ScentDiffuserDevice:
             self._schedule_disconnect()
             return True
 
+        # Cooldown after a recent failure: skip the connect attempt
+        # entirely and let the next user action retry. Prevents back-
+        # to-back retries from wedging a V3 firmware whose GATT stack
+        # is already in a bad state.
+        loop = asyncio.get_event_loop()
+        since_failure = loop.time() - self._ble_last_failure_ts
+        if 0 < since_failure < BLE_FAILURE_COOLDOWN_SECONDS:
+            _LOGGER.debug(
+                "BLE connect to %s skipped — within failure cooldown (%.1fs left)",
+                self._ble_name, BLE_FAILURE_COOLDOWN_SECONDS - since_failure,
+            )
+            return False
+
         async with self._ble_lock:
             # Double-check after acquiring lock
             if self._ble_connected and self._ble_client and self._ble_client.is_connected:
@@ -258,19 +285,23 @@ class ScentDiffuserDevice:
                     BleakClient,
                     target,
                     self._ble_name or self._ble_address,
-                    max_attempts=3,
+                    max_attempts=BLE_CONNECT_MAX_ATTEMPTS,
                 )
                 self._ble_connected = True
 
                 # Subscribe to notifications for responses. Without these
                 # the AK family can't sync state back to HA, so a silent
                 # failure here is worth surfacing — bump it from debug to
-                # warning so it shows up in logs and diagnostics.
+                # warning so it shows up in logs and diagnostics. Track
+                # whether the subscription took, so the disconnect path
+                # can call stop_notify before tearing the link down.
                 try:
                     await self._ble_client.start_notify(
                         self._protocol.notify_char_uuid, self._on_ble_notification
                     )
+                    self._ble_notify_subscribed = True
                 except Exception as err:
+                    self._ble_notify_subscribed = False
                     _LOGGER.warning(
                         "BLE start_notify failed on %s (%s): %s",
                         self._ble_name, self._protocol.notify_char_uuid, err,
@@ -316,8 +347,19 @@ class ScentDiffuserDevice:
                         for frame in self._protocol.build_read_state_queries():
                             await self._ble_send(frame)
                             await asyncio.sleep(0.15)
-                    except Exception as err:
-                        _LOGGER.debug("Scent Marketing AK: login/readback failed: %s", err)
+                    except (BleakError, asyncio.TimeoutError, OSError) as err:
+                        # Mid-handshake BLE failure leaves the link in
+                        # an unknown state — tear down rather than
+                        # keeping a half-broken connection scheduled
+                        # for idle disconnect, since reusing it tends
+                        # to make the V3 firmware's GATT stack wedge.
+                        _LOGGER.warning(
+                            "Scent Marketing AK handshake failed on %s: %s",
+                            self._ble_name, err,
+                        )
+                        await self._teardown_ble_client()
+                        self._ble_last_failure_ts = loop.time()
+                        return False
 
                 # Time sync on first connection of this session (skipped for
                 # protocols that don't support it).
@@ -347,7 +389,8 @@ class ScentDiffuserDevice:
 
             except (BleakError, asyncio.TimeoutError, OSError) as err:
                 _LOGGER.warning("BLE connect failed for %s: %s", self._ble_name, err)
-                self._ble_connected = False
+                await self._teardown_ble_client()
+                self._ble_last_failure_ts = loop.time()
                 return False
 
     def _schedule_disconnect(self) -> None:
@@ -360,14 +403,43 @@ class ScentDiffuserDevice:
         """Disconnect BLE after idle timeout."""
         await asyncio.sleep(BLE_IDLE_DISCONNECT_SECONDS)
         async with self._ble_lock:
-            if self._ble_client and self._ble_client.is_connected:
-                try:
-                    await self._ble_client.disconnect()
-                    _LOGGER.debug("BLE disconnected (idle): %s", self._ble_name)
-                except Exception:
-                    pass
-            self._ble_client = None
-            self._ble_connected = False
+            await self._teardown_ble_client(reason="idle")
+
+    async def _teardown_ble_client(self, *, reason: str = "error") -> None:
+        """Cleanly release the BLE client.
+
+        Always stop notifications before disconnecting (some firmwares —
+        notably the Scent Marketing V3 ESP32 — get into a stuck GATT
+        state if a client disconnects without unsubscribing first), then
+        disconnect, then drop the client reference so the next connect
+        attempt starts fresh. Safe to call when the client is already
+        gone; logs at debug.
+
+        Caller must hold `_ble_lock` if called from anywhere other than
+        the connect / delayed-disconnect paths (which already do).
+        """
+        client = self._ble_client
+        if client is not None and self._ble_notify_subscribed:
+            try:
+                await client.stop_notify(self._protocol.notify_char_uuid)
+            except Exception as err:
+                _LOGGER.debug(
+                    "BLE stop_notify on %s failed during teardown (%s): %s",
+                    self._ble_name, reason, err,
+                )
+        self._ble_notify_subscribed = False
+        if client is not None:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+                    _LOGGER.debug("BLE disconnected (%s): %s", reason, self._ble_name)
+            except Exception as err:
+                _LOGGER.debug(
+                    "BLE disconnect on %s failed during teardown (%s): %s",
+                    self._ble_name, reason, err,
+                )
+        self._ble_client = None
+        self._ble_connected = False
 
     async def _ble_send(self, data: bytes) -> bool:
         """Send a command via BLE.
@@ -376,6 +448,12 @@ class ScentDiffuserDevice:
         Scent Marketing GW family for instance needs (nonce, seq)-prefixed
         18-byte chunks. We delegate the split decision to the protocol and
         write each chunk sequentially.
+
+        Raises `BleakError`/`asyncio.TimeoutError`/`OSError` on write
+        failure (GATT-133 on Android surfaces here too). Callers wrap
+        this so they can decide whether to tear the BLE client down —
+        leaving a half-broken handle around made V3 firmwares unable
+        to be reached by *any* client until a power cycle.
         """
         if not self._ble_client or not self._ble_client.is_connected:
             return False
@@ -385,23 +463,26 @@ class ScentDiffuserDevice:
             if len(self._recent_commands) > 10:
                 del self._recent_commands[0]
         for chunk in chunks:
-            try:
-                await self._ble_client.write_gatt_char(
-                    self._protocol.write_char_uuid, chunk, response=True
-                )
-            except (BleakError, asyncio.TimeoutError, OSError) as err:
-                _LOGGER.warning("BLE write failed: %s", err)
-                return False
+            await self._ble_client.write_gatt_char(
+                self._protocol.write_char_uuid, chunk, response=True
+            )
         return True
 
     async def _ble_execute(self, data: bytes) -> bool:
         """Connect, send command, schedule disconnect."""
-        if await self._ble_connect():
+        if not await self._ble_connect():
+            return False
+        try:
             success = await self._ble_send(data)
-            # Wait briefly for notification response
-            await asyncio.sleep(1.0)
-            return success
-        return False
+        except (BleakError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.warning("BLE write failed on %s: %s", self._ble_name, err)
+            self._ble_last_failure_ts = asyncio.get_event_loop().time()
+            async with self._ble_lock:
+                await self._teardown_ble_client(reason="write-failure")
+            return False
+        # Wait briefly for notification response
+        await asyncio.sleep(1.0)
+        return success
 
     def _on_ble_notification(self, sender: int, data: bytearray) -> None:
         """Handle incoming BLE notification."""
@@ -753,8 +834,14 @@ class ScentDiffuserDevice:
         """Refresh device state."""
         if self._ble_address:
             if await self._ble_connect():
-                await self._ble_send(self._protocol.build_query())
-                await asyncio.sleep(1.0)
+                try:
+                    await self._ble_send(self._protocol.build_query())
+                    await asyncio.sleep(1.0)
+                except (BleakError, asyncio.TimeoutError, OSError) as err:
+                    _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
+                    self._ble_last_failure_ts = asyncio.get_event_loop().time()
+                    async with self._ble_lock:
+                        await self._teardown_ble_client(reason="refresh-failure")
             return
 
         if self.supports_cloud and self._cloud:
