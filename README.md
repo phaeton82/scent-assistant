@@ -51,6 +51,7 @@
 | Scentiment Diffuser Air 2 | Scentiment | BLE | JSON-over-BLE protocol; intensity, RGB LED, battery |
 | Scent Marketing diffusers (SA_* series) | Scent Marketing | BLE | V2 + V3 variants; Power, Fan, Program switch, intensity, schedule read-back |
 | Home Luxury Scents HLS-450+ | Home Luxury Scents | BLE | Rebadged Scent Marketing AK family |
+| Aromely Aro Max | Aromely | BLE | Power, Fan, daily schedule (work/pause), HVAC scent diffuser |
 
 ### Likely Compatible
 
@@ -296,6 +297,7 @@ This integration was built by reverse engineering the BLE protocols of both devi
 | Aroma-Link | `A5 AA AC ... C5 CC CA` | XOR | Power, fan, per-day scheduling (5 slots), time sync |
 | Tuya BLE (Aroma Buddy) | `55 AA ...` | Sum mod 256 | Power, scheduling (5 setups), time sync |
 | Scent Marketing AK | `8F` login (PIN 8888) + `2A`/`4A` schedule | None (length-framed) | Power, Fan, Program, schedule read-back; V2 + V3 variants |
+| Aromely Aro Max | `55 <dir> <reg> <type> [len payload]` on FFE0/FFE1/FFE2 | Sum mod 256 | Power, fan, daily schedule (work/pause as u16 seconds) |
 
 ---
 

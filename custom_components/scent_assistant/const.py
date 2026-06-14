@@ -14,6 +14,7 @@ class DeviceType(StrEnum):
     SCENT_MARKETING_AK = "scent_marketing_ak"          # Scent Marketing app, AK family (FFF0 service, simple byte commands)
     SCENT_MARKETING_GW = "scent_marketing_gw"          # Scent Marketing app, GW family (EE01 service, framed DP protocol)
     SCENT_MARKETING_GW_XOR = "scent_marketing_gw_xor"  # Scent Marketing app, GW family with XOR-encrypted JSON payload
+    AROMELY_ARO_MAX = "aromely_aro_max"                # Aromely Aro Max (FFE0 service, 55-framed register protocol)
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +35,40 @@ SCENTIMENT_CHAR_INFO_UUID = "0000fef4-0000-1000-8000-00805f9b34fb"   # Device me
 # Scent Marketing app — AK family (FFF0 service, simple byte commands + heartbeat)
 SM_AK_SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"
 SM_AK_CHAR_UUID = "0000fff6-0000-1000-8000-00805f9b34fb"
+
+# ---------------------------------------------------------------------------
+# Aromely Aro Max — 55-framed register protocol
+# ---------------------------------------------------------------------------
+# Data flows on the FFE0 service (write FFE2 / notify FFE1). The device
+# *advertises* the AF30 service UUID and carries "DiffuserAroMax" in its
+# manufacturer data; the BLE local name is a per-unit serial, so detection
+# keys on the advertised service / manufacturer data, not the name.
+# Decoded from @ahbhimani1's two nRF sniffer captures (#4), cross-checked
+# against the official Aromely app screenshots.
+AROMELY_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+AROMELY_CHAR_WRITE_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
+AROMELY_CHAR_NOTIFY_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+AROMELY_ADV_SERVICE_UUID = "0000af30-0000-1000-8000-00805f9b34fb"
+
+# Frame: 55 <dir> <reg> <type> [<len> <payload...>] <checksum>
+# checksum = sum of every byte after the 0x55 header, mod 256.
+AROMELY_FRAME_HEADER = 0x55
+AROMELY_DIR_WRITE = 0x10    # app -> device
+AROMELY_DIR_NOTIFY = 0x11   # device -> app
+AROMELY_TYPE_READ = 0x00    # read request (no length/payload follows)
+AROMELY_TYPE_DATA = 0x05    # data write / response (length + payload follow)
+# Registers
+AROMELY_REG_TIME = 0x00         # time sync: 20 HH MM SS (BCD)
+AROMELY_REG_SCHED_WRITE = 0x01  # write schedule slot 1
+AROMELY_REG_FAN = 0x06          # fan mode (0=off, 1=low, 2=full)
+AROMELY_REG_SESSION = 0x07      # session start (07 05 01 01)
+AROMELY_REG_POWER = 0x11        # power / schedule-enable (1=on, 0=off)
+AROMELY_REG_ID = 0x20           # device id push (read-only)
+AROMELY_REG_NAME = 0xDA         # device name (read)
+AROMELY_REG_INFO = 0xDB         # device flags (read)
+AROMELY_REG_LABEL = 0xDC        # note/label (read)
+AROMELY_REG_SCHED1 = 0xF1       # schedule slot 1 incl. enabled flag (read)
+AROMELY_REG_SCHED_ALL = 0xF2    # all four schedule slots (read)
 
 # AK command opcodes (mirrors com.IAA360.ChengHao.Device.Data.BtDataModel).
 # Negative bytes in the Java source are decoded to their 0..255 equivalents.
@@ -156,6 +191,10 @@ BLE_NAME_PATTERNS = {
     DeviceType.AROMA_LINK: ["Scent ", "DAP.A5"],
     DeviceType.TUYA_BLE: ["BT-ivy"],
     DeviceType.SCENTIMENT: ["Scentiment"],
+    # Most Aro Max units advertise a per-unit serial as the local name and
+    # are detected via the AF30 service / manufacturer data instead, but
+    # some expose "DiffuserAroMax" directly — match that as a fallback.
+    DeviceType.AROMELY_ARO_MAX: ["DiffuserAroMax", "DiffuserAro"],
 }
 
 # Scent Marketing devices are identified primarily by manufacturer-specific

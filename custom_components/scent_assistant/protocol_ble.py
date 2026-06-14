@@ -45,6 +45,13 @@ from .const import (
     SM_GW_DP_CUSTOMIZE_GEAR, SM_GW_DP_REMARK,
     SM_GW_PASSWORD_MARKER, SM_GW_PASSWORD_OK_BYTE,
     SM_GW_INIT_PACKET, SM_GW_HEARTBEAT_HEX, SM_GW_XOR_DICT,
+    AROMELY_SERVICE_UUID, AROMELY_CHAR_WRITE_UUID, AROMELY_CHAR_NOTIFY_UUID,
+    AROMELY_ADV_SERVICE_UUID,
+    AROMELY_FRAME_HEADER, AROMELY_DIR_WRITE, AROMELY_DIR_NOTIFY,
+    AROMELY_TYPE_READ, AROMELY_TYPE_DATA,
+    AROMELY_REG_TIME, AROMELY_REG_SCHED_WRITE, AROMELY_REG_FAN,
+    AROMELY_REG_SESSION, AROMELY_REG_POWER, AROMELY_REG_NAME,
+    AROMELY_REG_LABEL, AROMELY_REG_SCHED1,
     BLE_NAME_PATTERNS,
     TUYA_HEADER, TUYA_VERSION,
     TUYA_CMD_DP_WRITE, TUYA_CMD_DP_REPORT, TUYA_CMD_QUERY, TUYA_CMD_TIME_SYNC,
@@ -504,6 +511,160 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["ack"] = sub
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# Aromely Aro Max — 55-framed register protocol (FFE0 service)
+# ---------------------------------------------------------------------------
+
+class AromelyAroMaxProtocol(BleProtocol):
+    """Aromely Aro Max diffuser.
+
+    Frame layout (decoded from @ahbhimani1's captures, #4):
+
+        55 <dir> <reg> <type> [<len> <payload...>] <checksum>
+
+    `dir` is 0x10 (app->device) or 0x11 (device->app). `type` is 0x00 for
+    a bare read request (no length/payload) or 0x05 for a data write /
+    response. `checksum` is the sum of every byte after the 0x55 header,
+    mod 256.
+
+    The schedule (register 0x01 write / 0xF1 read) carries a day mask,
+    start/end time and the work/pause durations as big-endian u16 seconds.
+    Power is register 0x11, fan is register 0x06 (the device has three fan
+    modes; we expose a plain on/off switch).
+    """
+
+    device_type = DeviceType.AROMELY_ARO_MAX
+    service_uuid = AROMELY_SERVICE_UUID
+    write_char_uuid = AROMELY_CHAR_WRITE_UUID
+    notify_char_uuid = AROMELY_CHAR_NOTIFY_UUID
+
+    @staticmethod
+    def _frame(reg: int, payload: bytes | None) -> bytes:
+        """Wrap a register write/read in the 55 envelope with checksum."""
+        body = bytearray([AROMELY_DIR_WRITE, reg])
+        if payload is None:
+            body.append(AROMELY_TYPE_READ)
+        else:
+            body.append(AROMELY_TYPE_DATA)
+            body.append(len(payload) & 0xFF)
+            body.extend(payload)
+        body.append(sum(body) & 0xFF)
+        return bytes([AROMELY_FRAME_HEADER]) + bytes(body)
+
+    # -- handshake / reads ------------------------------------------------
+
+    def build_session_start(self) -> bytes:
+        """First frame after connect — the app sends this before anything."""
+        return self._frame(AROMELY_REG_SESSION, bytes([0x01]))
+
+    def build_time_sync(self, now: datetime | None = None) -> bytes:
+        """Time sync: `00 05 04 20 HH MM SS` with HH/MM/SS in BCD."""
+        if now is None:
+            now = datetime.now()
+        bcd = lambda v: (((v // 10) << 4) | (v % 10)) & 0xFF
+        return self._frame(
+            AROMELY_REG_TIME,
+            bytes([0x20, bcd(now.hour), bcd(now.minute), bcd(now.second)]),
+        )
+
+    def build_read_queries(self) -> list[bytes]:
+        """Read name, label and the slot-1 schedule (incl. enabled flag)."""
+        return [
+            self._frame(AROMELY_REG_NAME, None),
+            self._frame(AROMELY_REG_LABEL, None),
+            self._frame(AROMELY_REG_SCHED1, None),
+        ]
+
+    def build_query(self) -> bytes:
+        return self._frame(AROMELY_REG_SCHED1, None)
+
+    # -- controls ---------------------------------------------------------
+
+    def build_power(self, on: bool) -> bytes:
+        return self._frame(AROMELY_REG_POWER, bytes([0x01 if on else 0x00]))
+
+    def build_fan(self, on: bool) -> bytes:
+        # Three device modes (0=off, 1=low, 2=full). The HA switch maps to
+        # low/off; "full" is only reachable from the official app for now.
+        return self._frame(AROMELY_REG_FAN, bytes([0x01 if on else 0x00]))
+
+    def supports_fan(self) -> bool:
+        return True
+
+    def build_schedule(
+        self,
+        slot: ScheduleSlot,
+        weekday_mask: int = 0x7F,
+        intensity: int = 0,
+    ) -> bytes:
+        """Schedule slot-1 write: day mask, window, work/pause (u16 s)."""
+        work = max(0, min(0xFFFF, int(slot.work_seconds)))
+        pause = max(0, min(0xFFFF, int(slot.pause_seconds)))
+        payload = bytes([
+            weekday_mask & 0x7F,
+            slot.start_hour & 0xFF, slot.start_minute & 0xFF,
+            slot.end_hour & 0xFF, slot.end_minute & 0xFF,
+            (work >> 8) & 0xFF, work & 0xFF,
+            (pause >> 8) & 0xFF, pause & 0xFF,
+        ])
+        return self._frame(AROMELY_REG_SCHED_WRITE, payload)
+
+    # -- parsing ----------------------------------------------------------
+
+    def parse_notification(self, data: bytes) -> dict:
+        result: dict = {}
+        if (
+            len(data) < 6
+            or data[0] != AROMELY_FRAME_HEADER
+            or data[1] != AROMELY_DIR_NOTIFY
+            or data[3] != AROMELY_TYPE_DATA
+        ):
+            return result
+        reg = data[2]
+        length = data[4]
+        payload = data[5:5 + length]
+
+        if reg == AROMELY_REG_NAME:
+            name = payload.lstrip(b"\x00").decode("utf-8", "replace").strip()
+            if name:
+                result["device_name"] = name
+        elif reg == AROMELY_REG_LABEL:
+            label = payload.lstrip(b"\x00").decode("utf-8", "replace").strip()
+            if label:
+                result["device_label"] = label
+        elif reg == AROMELY_REG_POWER and payload:
+            result["power"] = payload[0] == 0x01
+            result["phase"] = "idle" if result["power"] else "off"
+        elif reg == AROMELY_REG_FAN and payload:
+            result["fan"] = payload[0] != 0x00
+        elif reg in (AROMELY_REG_SCHED1, AROMELY_REG_SCHED_WRITE):
+            self._parse_schedule(reg, payload, result)
+        return result
+
+    @staticmethod
+    def _parse_schedule(reg: int, payload: bytes, result: dict) -> None:
+        # F1 read:        <enabled> <mask> <sH sM eH eM> <work_u16> <pause_u16> ...
+        # 01 write echo:           <mask> <sH sM eH eM> <work_u16> <pause_u16>
+        if reg == AROMELY_REG_SCHED1 and len(payload) >= 10:
+            result["schedule_enabled"] = payload[0] == 0x01
+            base = 1
+        elif reg == AROMELY_REG_SCHED_WRITE and len(payload) >= 9:
+            base = 0
+        else:
+            return
+        result["weekday_mask"] = payload[base]
+        result["start_hour"] = payload[base + 1]
+        result["start_minute"] = payload[base + 2]
+        result["end_hour"] = payload[base + 3]
+        result["end_minute"] = payload[base + 4]
+        work = (payload[base + 5] << 8) | payload[base + 6]
+        pause = (payload[base + 7] << 8) | payload[base + 8]
+        if 0 < work <= 0xFFFF:
+            result["work_seconds"] = work
+        if 0 < pause <= 0xFFFF:
+            result["pause_seconds"] = pause
 
 
 # ---------------------------------------------------------------------------
@@ -1786,6 +1947,8 @@ def get_protocol(
         return ScentMarketingGwProtocol(tuya_dp_mode=tuya)
     elif device_type == DeviceType.SCENT_MARKETING_GW_XOR:
         return ScentMarketingGwXorProtocol(mac=mac, tuya_dp_mode=tuya)
+    elif device_type == DeviceType.AROMELY_ARO_MAX:
+        return AromelyAroMaxProtocol()
     raise ValueError(f"Unknown device type: {device_type}")
 
 
@@ -1867,11 +2030,16 @@ def detect_device_type(
     Detection priority:
       1. Manufacturer-specific data for Scent Marketing families (most
          reliable — the Android app uses this exclusively).
-      2. BLE local-name prefix patterns for the other families.
+      2. Advertised service / manufacturer data for Aromely Aro Max
+         (its local name is a per-unit serial).
+      3. BLE local-name prefix patterns for the other families.
     """
     sm_type = _detect_scent_marketing(advertisement_data)
     if sm_type is not None:
         return sm_type
+
+    if _detect_aromely(advertisement_data):
+        return DeviceType.AROMELY_ARO_MAX
 
     if not ble_name:
         return None
@@ -1881,3 +2049,24 @@ def detect_device_type(
             if lowered.startswith(pattern.lower()):
                 return dtype
     return None
+
+
+def _detect_aromely(advertisement_data) -> bool:
+    """Match an Aromely Aro Max from its advertisement.
+
+    The unit advertises the AF30 service UUID and carries the ASCII
+    "AroMax" / "Diffuser" in its manufacturer data, while the local name
+    is a per-unit serial — so neither name prefix nor a Scent-Marketing
+    style manufacturer-ID match works here.
+    """
+    if advertisement_data is None:
+        return False
+    uuids = getattr(advertisement_data, "service_uuids", None) or []
+    for u in uuids:
+        if str(u).lower() == AROMELY_ADV_SERVICE_UUID or str(u).lower().startswith("0000af30"):
+            return True
+    mfr_data = getattr(advertisement_data, "manufacturer_data", None) or {}
+    for payload in mfr_data.values():
+        if b"AroMax" in payload or b"DiffuserAro" in payload:
+            return True
+    return False

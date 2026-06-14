@@ -32,6 +32,7 @@ from .protocol_ble import (
     ScentMarketingAkProtocol,
     ScentMarketingGwProtocol,
     ScentMarketingGwXorProtocol,
+    AromelyAroMaxProtocol,
     get_protocol,
     detect_device_type,
 )
@@ -171,6 +172,7 @@ class ScentDiffuserDevice:
             DeviceType.SCENT_MARKETING_AK: "Scent Marketing (AK)",
             DeviceType.SCENT_MARKETING_GW: "Scent Marketing (GW)",
             DeviceType.SCENT_MARKETING_GW_XOR: "Scent Marketing (GW, encrypted)",
+            DeviceType.AROMELY_ARO_MAX: "Aromely Aro Max",
         }
         base = mapping.get(self._device_type, self._device_type.value)
         # Append the PID when known — different OEMs share the same family
@@ -374,6 +376,31 @@ class ScentDiffuserDevice:
                         # to make the V3 firmware's GATT stack wedge.
                         _LOGGER.warning(
                             "Scent Marketing AK handshake failed on %s: %s",
+                            self._ble_name, err,
+                        )
+                        await self._teardown_ble_client()
+                        self._ble_last_failure_ts = loop.time()
+                        return False
+
+                # Aromely Aro Max — the app opens every session with a
+                # session-start frame, then a time sync, then reads back
+                # the name / label / schedule. We mirror that so HA starts
+                # from the device's real stored state.
+                if isinstance(self._protocol, AromelyAroMaxProtocol):
+                    try:
+                        await self._ble_send(self._protocol.build_session_start())
+                        await asyncio.sleep(0.2)
+                        ar_time = self._protocol.build_time_sync()
+                        if ar_time:
+                            await self._ble_send(ar_time)
+                            await asyncio.sleep(0.2)
+                            self._ble_has_synced_time = True
+                        for frame in self._protocol.build_read_queries():
+                            await self._ble_send(frame)
+                            await asyncio.sleep(0.15)
+                    except (BleakError, asyncio.TimeoutError, OSError) as err:
+                        _LOGGER.warning(
+                            "Aromely Aro Max handshake failed on %s: %s",
                             self._ble_name, err,
                         )
                         await self._teardown_ble_client()
@@ -654,7 +681,7 @@ class ScentDiffuserDevice:
         if not self._ble_address:
             return False
         proto = self._protocol
-        if isinstance(proto, (AromaLinkBleProtocol, ScentMarketingAkProtocol)):
+        if isinstance(proto, (AromaLinkBleProtocol, ScentMarketingAkProtocol, AromelyAroMaxProtocol)):
             cmd = proto.build_fan(on)
             if await self._ble_execute(cmd):
                 self._state.fan = on
@@ -859,6 +886,12 @@ class ScentDiffuserDevice:
                 cmd = self._protocol.build_schedule(
                     slot, weekday_mask=weekday_mask, intensity=level,
                 )
+            elif isinstance(self._protocol, AromelyAroMaxProtocol):
+                slot = ScheduleSlot(
+                    start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
+                    enabled=enabled, work_seconds=work, pause_seconds=pause,
+                )
+                cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
 
             if cmd and await self._ble_execute(cmd):
                 self._notify_state_changed()
