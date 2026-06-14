@@ -30,7 +30,6 @@ from .const import (
     SM_AK_OPCODE_LOGIN_RESPONSE, SM_AK_V3_COMMIT,
     SM_AK_V3_FAN_ON, SM_AK_V3_FAN_OFF,
     SM_AK_V3_SLOT_WEEKEND, SM_AK_V3_SLOT_WEEKDAY,
-    SM_AK_V3_SCHEDULE_TRAILER,
     SM_AK_DAY_MASK_WEEKDAYS, SM_AK_DAY_MASK_WEEKEND, SM_AK_DAY_MASK_DAILY,
     SM_GW_SERVICE_UUID, SM_GW_NOTIFY_UUID, SM_GW_WRITE_UUID,
     SM_MFR_ID_AK, SM_MFR_ID_GW, SM_MFR_ID_GW_ALT,
@@ -877,7 +876,14 @@ class ScentMarketingAkProtocol(BleProtocol):
         ON from a clean disabled state. Earlier captures showing the
         opposite were of a different action ("set as weekend pattern"
         vs. "make this slot live"), not the Program switch toggle.
-        Trailer bytes are captured verbatim.
+
+        The trailing four bytes are the work and pause durations, each a
+        big-endian u16: `<work_hi work_lo pause_hi pause_lo>`.
+        @christiandion's app capture showed `00 05 00 F0` = (5 s work,
+        240 s pause), matching an entry in his device's intensity table.
+        The old hardcoded `00 0F 01 2C` was simply one such pair (15 s /
+        300 s) — writing it verbatim meant the user's Work / Pause
+        Duration never actually reached the device (#20, A323).
         """
         # Pick the slot that matches the typical weekend/weekday day-mask
         # pattern; default to the weekend slot for custom masks, since
@@ -900,7 +906,13 @@ class ScentMarketingAkProtocol(BleProtocol):
             0x00,
             max(0, min(20, int(intensity))) & 0xFF,
         ])
-        return head + SM_AK_V3_SCHEDULE_TRAILER
+        work = max(0, min(0xFFFF, int(slot.work_seconds)))
+        pause = max(0, min(0xFFFF, int(slot.pause_seconds)))
+        trailer = bytes([
+            (work >> 8) & 0xFF, work & 0xFF,
+            (pause >> 8) & 0xFF, pause & 0xFF,
+        ])
+        return head + trailer
 
     # Backwards-compatible alias kept for external callers that still
     # invoke `build_schedule_v2` directly. New code should use
@@ -1077,6 +1089,15 @@ class ScentMarketingAkProtocol(BleProtocol):
             # the read-back, with read/write semantics for EE inverted
             # (write: 01=enable / 03=disable; read: 03=enabled / 01=
             # disabled).
+            # Trailer (offsets 14..17) = work / pause durations, each a
+            # big-endian u16 — the same encoding we now write. Surface
+            # them so the Work / Pause Duration entities reflect what the
+            # device actually has stored instead of snapping back to a
+            # stale optimistic value (#20).
+            work_seconds = pause_seconds = None
+            if len(data) >= 18:
+                work_seconds = (data[14] << 8) | data[15]
+                pause_seconds = (data[16] << 8) | data[17]
             self._absorb_schedule(
                 slot_index=data[5],
                 start_hour=data[7], start_minute=data[8],
@@ -1084,6 +1105,8 @@ class ScentMarketingAkProtocol(BleProtocol):
                 weekday_mask=data[11],
                 intensity=data[13],
                 result=result,
+                work_seconds=work_seconds,
+                pause_seconds=pause_seconds,
             )
             # V3 fan state is the authoritative source on read-back; it
             # overrides whatever the 4D bitmask said (V3's 4D 01 FF
@@ -1183,6 +1206,8 @@ class ScentMarketingAkProtocol(BleProtocol):
         weekday_mask: int,
         intensity: int,
         result: dict,
+        work_seconds: int | None = None,
+        pause_seconds: int | None = None,
     ) -> None:
         """Populate `result` with schedule fields from a parsed slot.
 
@@ -1205,6 +1230,12 @@ class ScentMarketingAkProtocol(BleProtocol):
         # values in uninitialised slots).
         ceiling = 20 if self.is_v3 else 10
         result["intensity"] = max(0, min(ceiling, intensity & 0xFF))
+        # Work / pause durations (V3 trailer). Only surface plausible
+        # values — uninitialised read-back slots can carry junk here.
+        if work_seconds is not None and 0 < work_seconds <= 0xFFFF:
+            result["work_seconds"] = work_seconds
+        if pause_seconds is not None and 0 < pause_seconds <= 0xFFFF:
+            result["pause_seconds"] = pause_seconds
 
 
 class ScentMarketingGwProtocol(BleProtocol):
