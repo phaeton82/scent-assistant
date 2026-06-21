@@ -234,7 +234,14 @@ class DiffuserOilConsumptionSensor(_OilFieldSensor):
 
 
 class DiffuserOilDaysSensor(_OilFieldSensor):
-    """Estimated days of fragrance remaining (AK V3)."""
+    """Estimated days of fragrance remaining (AK V3).
+
+    Computed in the device layer from current oil, consumption rate, the
+    active schedule window and the work/pause duty cycle (matching the
+    official app). Only available in Custom mode — Level mode needs the
+    device grade table, which isn't captured yet, so it stays unavailable
+    there rather than showing the unreliable raw value (@Mins95 #8).
+    """
 
     _attr_name = "Oil days remaining"
     _attr_icon = "mdi:calendar-clock"

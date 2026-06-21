@@ -592,7 +592,7 @@ class ScentDiffuserDevice:
             changed = True
         for _oil_field in (
             "oil_current_ml", "oil_max_ml",
-            "oil_consumption_mlh", "oil_days_remaining",
+            "oil_consumption_mlh",
             "schedule_custom_mode",
         ):
             if _oil_field in updates:
@@ -630,8 +630,58 @@ class ScentDiffuserDevice:
             self._state.schedule_enabled = updates["schedule_enabled"]
             changed = True
 
+        # Derive oil days-remaining from the latest oil + schedule state.
+        # The 0x50 frame's raw value doesn't match the official app, which
+        # computes it, so we mirror that math here (see _recompute_oil_days).
+        if self._recompute_oil_days():
+            changed = True
+
         if changed:
             self._notify_state_changed()
+
+    def _recompute_oil_days(self) -> bool:
+        """Derive estimated oil days-remaining the way the official app does.
+
+            days = current_ml / (consumption_mlh × active_hours_per_day × duty)
+
+        where ``duty = work / (work + pause)``. In Custom mode the work/pause
+        durations are the live values, so this is exact. In Level mode the
+        device runs an internal grade→work/pause table we haven't captured for
+        the AK V3 family yet, so we can't know the real duty cycle — days then
+        stays unavailable rather than showing a wrong number (the raw value in
+        the 0x50 frame disagreed with the app: 836 d vs 293 d, @Mins95 #8).
+
+        Returns True when the stored value changed.
+        """
+        s = self._state
+        prev = s.oil_days_remaining
+        new: int | None = None
+        cur = s.oil_current_ml
+        cons = s.oil_consumption_mlh
+        if cur and cur > 0 and cons and cons > 0:
+            sh, sm, eh, em = (
+                s.start_hour, s.start_minute, s.end_hour, s.end_minute,
+            )
+            if None not in (sh, sm, eh, em):
+                minutes = (eh * 60 + em) - (sh * 60 + sm)
+                if minutes <= 0:  # window wraps past midnight
+                    minutes += 24 * 60
+                hours = minutes / 60.0
+                # Duty cycle: Custom mode carries the real work/pause; Level
+                # mode needs the device grade table (not captured yet for AK
+                # V3), so we only compute for Custom.
+                work = pause = None
+                if s.schedule_custom_mode and s.work_seconds and s.pause_seconds:
+                    work, pause = s.work_seconds, s.pause_seconds
+                if work and pause and hours > 0:
+                    duty = work / (work + pause)
+                    daily = cons * hours * duty
+                    if daily > 0:
+                        new = round(cur / daily)
+        if new != prev:
+            s.oil_days_remaining = new
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Commands (BLE first, cloud fallback)
@@ -810,6 +860,25 @@ class ScentDiffuserDevice:
             self._notify_state_changed()
             return True
         return False
+
+    async def set_schedule_mode(self, custom: bool) -> bool:
+        """Explicitly select the AK V3 schedule mode (Custom vs Level).
+
+        Mirrors the official app's mode toggle. Custom honours the Work/Pause
+        Duration; Level uses the device's grade table (Intensity selects the
+        grade). The implicit mode-follows-control behaviour stays — this just
+        lets the user pin the mode directly without nudging a duration or the
+        intensity (@Mins95's UX request, #8).
+        """
+        if not isinstance(self._protocol, ScentMarketingAkProtocol):
+            return False
+        if not self._protocol.is_v3:
+            return False
+        self._state.schedule_custom_mode = custom
+        self._notify_state_changed()
+        if self._ble_address:
+            return await self._write_schedule_to_device(custom_mode=custom)
+        return True
 
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""

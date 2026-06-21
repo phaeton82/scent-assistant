@@ -32,7 +32,7 @@ from .protocol_cloud import AromaLinkCloudClient
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["switch", "sensor", "number", "time", "button", "light"]
+PLATFORMS = ["switch", "sensor", "number", "time", "button", "light", "select"]
 
 SERVICE_SET_SCHEDULE = "set_schedule"
 

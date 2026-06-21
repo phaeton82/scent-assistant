@@ -160,10 +160,11 @@ The set of entities depends on which device family is connected.
 | Child Lock | Switch | Lock physical buttons |
 | Intensity | Number | Spray intensity / grade (0–10 on V2, 0–20 on V3) |
 | Work / Pause Duration | Number | Custom spray timing (V3 — switches the schedule to Custom mode) |
+| Schedule mode | Select | Custom (uses Work/Pause Duration) vs Level (uses Intensity grade) — V3 |
 | Start Time / End Time | Time | Daily schedule window |
 | Oil remaining | Sensor | Fragrance level percentage (V3 models with an oil sensor) |
 | Oil remaining (ml) / Oil capacity | Sensor | Current and total fragrance volume (V3) |
-| Oil consumption / Oil days remaining | Sensor | Usage rate and estimated days left (V3) |
+| Oil consumption / Oil days remaining | Sensor | Usage rate and estimated days left (V3; days computed in Custom mode) |
 
 ---
 

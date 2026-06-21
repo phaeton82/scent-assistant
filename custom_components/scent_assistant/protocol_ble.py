@@ -1244,17 +1244,19 @@ class ScentMarketingAkProtocol(BleProtocol):
 
         elif op == 0x50 and len(data) >= 8:  # oil info (CE response)
             # @Mins95's #18 decode:
-            #   `50 <enabled> <consumption×100 u16> <days u16> <current_ml u16>`
-            # e.g. 5001005203830258 = on, 0.82 ml/h, 899 days, 600 ml.
+            #   `50 <enabled> <consumption×100 u16> <field u16> <field u16>`
+            # Only the consumption rate is trustworthy here. The 4B frame is
+            # the single source of truth for current_ml / max_ml / percentage
+            # — @Mins95's beta.7 test (#8) showed 4B reporting 584 ml (and the
+            # % matched it) while this 50 frame's last u16 read 595 ml, so we
+            # no longer let it overwrite oil_current_ml. The other u16 ("days")
+            # is also unreliable: the official app *computes* days-remaining
+            # from oil / consumption / schedule / duty-cycle rather than
+            # reading a raw field (his device reported 836 vs the app's 293),
+            # so we derive it ourselves in device.py and ignore this value.
             consumption = (data[2] << 8) | data[3]
-            days = (data[4] << 8) | data[5]
-            current_ml = (data[6] << 8) | data[7]
             if consumption > 0:
                 result["oil_consumption_mlh"] = consumption / 100.0
-            if 0 < days < 0xFFFF:
-                result["oil_days_remaining"] = days
-            if current_ml > 0:
-                result["oil_current_ml"] = current_ml
 
         elif op == 0x83 and len(data) >= 8:
             # V2 schedule slot read-back. Layout matches the write but
