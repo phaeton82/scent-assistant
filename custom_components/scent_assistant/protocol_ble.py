@@ -20,7 +20,7 @@ from .const import (
     SM_AK_CMD_READ_FIRMWARE, SM_AK_CMD_READ_EQUIPMENT,
     SM_AK_CMD_V3_READ_NAME, SM_AK_CMD_V3_READ_SCHEDULES,
     SM_AK_CMD_V3_READ_SLOT, SM_AK_CMD_V3_READ_LABEL,
-    SM_AK_CMD_V3_READ_OIL, SM_AK_CMD_V3_READ_FIRMWARE,
+    SM_AK_CMD_V3_READ_OIL, SM_AK_CMD_V3_READ_OIL_INFO, SM_AK_CMD_V3_READ_FIRMWARE,
     SM_AK_CMD_V3_READ_CONTROL, SM_AK_CMD_V3_READ_MODEL,
     SM_AK_RESP_SCHEDULE_V3, SM_AK_RESP_DEVICE_NAME_V3,
     SM_AK_RESP_LABEL_V3, SM_AK_RESP_MODEL_V3,
@@ -107,6 +107,14 @@ class DiffuserState:
     # Scent Marketing GW-only
     lock: bool | None = None           # child-lock state
     oil_remaining: int | None = None   # percent 0-100
+    # AK V3 oil block (@Mins95's #18 decode)
+    oil_current_ml: int | None = None
+    oil_max_ml: int | None = None
+    oil_consumption_mlh: float | None = None
+    oil_days_remaining: int | None = None
+    # AK V3 schedule mode: True = Custom (work/pause honoured), False =
+    # Level (device grade table). None until first read.
+    schedule_custom_mode: bool | None = None
     light_on: bool | None = None       # auxiliary LED state
     device_name: str | None = None     # user-set device name (DP 6)
     password_required: bool | None = None  # GW device demands password auth
@@ -970,17 +978,23 @@ class ScentMarketingAkProtocol(BleProtocol):
         weekday_mask: int = SM_AK_DAY_MASK_DAILY,
         index: int = 1,
         intensity: int = 6,
+        custom_mode: bool = True,
     ) -> bytes:
         """Build a schedule write in the dialect this device speaks.
 
         V2 vs V3 selection follows the login-response. V2 is the simple
         16-byte 0x03 frame; V3 is the longer 18-byte 0x2A frame with a
         slot tied to weekday/weekend in the official app.
+
+        `custom_mode` (V3 only) selects the schedule mode: True = Custom
+        (the device honours our Work/Pause Duration), False = Level (the
+        device uses its own grade→work/pause table and ignores ours).
         """
         if self.is_v3:
             return self._build_schedule_v3(
                 slot, weekday_mask, intensity,
                 fan=self._ctrl_bits.get(SM_AK_CTRL_BIT_FAN, False),
+                custom_mode=custom_mode,
             )
         return self._build_schedule_v2(slot, weekday_mask, index, intensity)
 
@@ -1018,6 +1032,7 @@ class ScentMarketingAkProtocol(BleProtocol):
         weekday_mask: int,
         intensity: int,
         fan: bool = False,
+        custom_mode: bool = True,
     ) -> bytes:
         """V3 schedule frame (18 bytes), matching @Mins95's captures:
 
@@ -1055,6 +1070,15 @@ class ScentMarketingAkProtocol(BleProtocol):
             slot_id = SM_AK_V3_SLOT_WEEKEND
         state = 0x03 if slot.enabled else 0x01
         fan_byte = 0x03 if fan else 0x01
+        # Offset 12 is the Custom/Level mode selector: 0x01 = Custom
+        # (device honours the work/pause trailer), 0x00 = Level (device
+        # uses its grade→work/pause table and ignores the trailer).
+        # @Mins95's #8 differential nailed this: his Custom frame is
+        # `…7F 01 01 0018 0128`, his Level-3 frame `…7F 00 03 0018 0128`.
+        # We previously hardcoded 0x00 here, so the device stayed in
+        # Level mode and silently ignored every Work/Pause Duration the
+        # user set (#20). Default to Custom so those values take effect.
+        mode_byte = 0x01 if custom_mode else 0x00
         head = bytes([
             SM_AK_CMD_SCHEDULE_V3, 0x01, 0x02, fan_byte,
             0x00, slot_id,
@@ -1064,7 +1088,7 @@ class ScentMarketingAkProtocol(BleProtocol):
             slot.end_hour & 0xFF,
             slot.end_minute & 0xFF,
             weekday_mask & 0xFF,
-            0x00,
+            mode_byte,
             max(0, min(20, int(intensity))) & 0xFF,
         ])
         work = max(0, min(0xFFFF, int(slot.work_seconds)))
@@ -1116,6 +1140,11 @@ class ScentMarketingAkProtocol(BleProtocol):
                 bytes([SM_AK_CMD_V3_READ_FIRMWARE]),
                 bytes([SM_AK_CMD_V3_READ_CONTROL]),
                 bytes([SM_AK_CMD_V3_READ_MODEL]),
+                # Oil block (@Mins95's #18 decode): C8 → 4B max/current ml,
+                # CE → 50 enabled/consumption/days/current. Without these
+                # the oil sensors stay null.
+                bytes([SM_AK_CMD_V3_READ_OIL]),
+                bytes([SM_AK_CMD_V3_READ_OIL_INFO]),
             ]
         return [
             bytes([SM_AK_CMD_READ_DEVICE_NAME]),
@@ -1203,15 +1232,29 @@ class ScentMarketingAkProtocol(BleProtocol):
                 result["fan"] = self._ctrl_bits[SM_AK_CTRL_BIT_FAN]
                 result["light_on"] = self._ctrl_bits[SM_AK_CTRL_BIT_LAMP]
 
-        elif op == 0x4B and len(data) >= 4:  # battery + oil-remaining
-            result["battery"] = data[1] & 0xFF
-            # Bytes 2..3 = aroma0 total (u16), 4..5 = remainder etc.; we
-            # only surface the first nozzle's remainder as a percentage.
-            if len(data) >= 8:
-                total = (data[4] << 8) | data[5]
-                remainder = (data[6] << 8) | data[7]
-                if total > 0:
-                    result["oil_remaining"] = max(0, min(100, int(100 * remainder / total)))
+        elif op == 0x4B and len(data) >= 6:  # oil block (C8 response)
+            # @Mins95's #18 decode: `4B 00 <max_ml u16> <current_ml u16>`.
+            # e.g. 4B0003520258 = 850 ml capacity, 600 ml current → 71%.
+            max_ml = (data[2] << 8) | data[3]
+            current_ml = (data[4] << 8) | data[5]
+            if max_ml > 0:
+                result["oil_max_ml"] = max_ml
+                result["oil_current_ml"] = current_ml
+                result["oil_remaining"] = max(0, min(100, round(100 * current_ml / max_ml)))
+
+        elif op == 0x50 and len(data) >= 8:  # oil info (CE response)
+            # @Mins95's #18 decode:
+            #   `50 <enabled> <consumption×100 u16> <days u16> <current_ml u16>`
+            # e.g. 5001005203830258 = on, 0.82 ml/h, 899 days, 600 ml.
+            consumption = (data[2] << 8) | data[3]
+            days = (data[4] << 8) | data[5]
+            current_ml = (data[6] << 8) | data[7]
+            if consumption > 0:
+                result["oil_consumption_mlh"] = consumption / 100.0
+            if 0 < days < 0xFFFF:
+                result["oil_days_remaining"] = days
+            if current_ml > 0:
+                result["oil_current_ml"] = current_ml
 
         elif op == 0x83 and len(data) >= 8:
             # V2 schedule slot read-back. Layout matches the write but
@@ -1269,34 +1312,36 @@ class ScentMarketingAkProtocol(BleProtocol):
                 work_seconds=work_seconds,
                 pause_seconds=pause_seconds,
             )
-            # V3 fan state is the authoritative source on read-back; it
-            # overrides whatever the 4D bitmask said (V3's 4D 01 FF
-            # reports all bits set regardless of actual fan state).
-            # Mirror into _ctrl_bits so subsequent schedule writes embed
-            # the correct fan byte at offset 3.
-            if data[3] in (0x01, 0x03):
-                fan_now = data[3] == 0x03
-                result["fan"] = fan_now
-                self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = fan_now
-            # V3 program-enabled flag. Two bytes have to line up for
-            # the schedule to actually run on the device:
-            #   - data[4] = "active slot" indicator (slot ID when the
-            #     program is genuinely live, 0x00 otherwise)
-            #   - data[6] = EE on read (0x03 enabled, 0x01 disabled)
-            # @Mins95 observed beta.9 producing a "hybrid" state with
-            # EE=03 but active-slot=00 after HA-side toggles, which the
-            # device treats as not-actually-running. Require both bytes
-            # to align so HA's switch state reflects reality.
-            active_slot = data[4] != 0
-            # EE carries the enabled flag in bit1 (0x02). @Mins95's V3 uses
-            # 0x03 (enabled) / 0x01 (disabled); christiandion's Flair Tower
-            # variant (#8) uses 0x07 / 0x05 — same bit1 meaning, just with
-            # an extra bit2 set. Testing the bit instead of the exact byte
-            # reads both variants correctly. (The bit1 meaning on the Flair
-            # is inferred from its app's write frames and still wants a live
-            # enabled-vs-disabled capture to confirm.)
-            ee_enabled = bool(data[6] & 0x02)
-            result["schedule_enabled"] = active_slot and ee_enabled
+            # The V3 device pushes one 4A per slot, and most are empty
+            # placeholders (all-zero times + mask). Only derive live
+            # device state (fan, program-enabled, mode) from a slot that
+            # actually carries a schedule — otherwise a trailing empty
+            # slot clobbers the real one's values back to off/false
+            # (@Mins95 saw schedule_enabled flip to false this way, #8).
+            slot_empty = (
+                data[7] == 0 and data[8] == 0 and data[9] == 0
+                and data[10] == 0 and data[11] == 0
+            )
+            if not slot_empty:
+                # V3 fan state is authoritative on read-back; it overrides
+                # the 4D bitmask (V3's 4D 01 FF reports all bits set).
+                if data[3] in (0x01, 0x03):
+                    fan_now = data[3] == 0x03
+                    result["fan"] = fan_now
+                    self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = fan_now
+                # Offset 12 = Custom/Level mode selector (01 = Custom,
+                # 00 = Level), NOT the enabled flag — @Mins95's #8
+                # Level↔Custom differential confirmed this. Surface it so
+                # HA can keep writing in Custom mode (and so the schedule
+                # switch stops mistaking Level mode for "disabled").
+                result["schedule_custom_mode"] = data[12] == 0x01
+                # Program-enabled: data[4] = "active slot" indicator (slot
+                # ID when genuinely live, 0 otherwise); data[6] = EE, whose
+                # bit1 (0x02) carries enabled. @Mins95's V3 uses 0x03/0x01,
+                # christiandion's Flair 0x07/0x05 — same bit1 meaning.
+                active_slot = data[4] != 0
+                ee_enabled = bool(data[6] & 0x02)
+                result["schedule_enabled"] = active_slot and ee_enabled
 
         elif op == SM_AK_RESP_DEVICE_NAME_V3 and len(data) >= 2:
             # V3 reply to C6: `42 <utf8 name bytes…>`. Name is variable

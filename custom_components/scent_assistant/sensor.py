@@ -58,6 +58,16 @@ async def async_setup_entry(
     if device.device_type in SCENT_MARKETING_TYPES:
         entities.append(DiffuserDetectionDiagnostic(device, entry))
 
+    # Scent Marketing AK V3 oil block (decoded by @Mins95, #18). Sensors
+    # stay unavailable until the device answers C8/CE, so registering them
+    # for the whole AK family is safe (V2 simply never populates them).
+    if device.device_type == DeviceType.SCENT_MARKETING_AK:
+        entities.append(DiffuserOilSensor(device, entry))
+        entities.append(DiffuserOilCurrentSensor(device, entry))
+        entities.append(DiffuserOilCapacitySensor(device, entry))
+        entities.append(DiffuserOilConsumptionSensor(device, entry))
+        entities.append(DiffuserOilDaysSensor(device, entry))
+
     async_add_entities(entities)
 
 
@@ -156,6 +166,81 @@ class DiffuserOilSensor(SensorEntity):
     @property
     def available(self) -> bool:
         return self._device.available and self._device.state.oil_remaining is not None
+
+
+class _OilFieldSensor(SensorEntity):
+    """Base for the AK V3 oil-block detail sensors (#18).
+
+    Subclasses set `_attr_name`, `_uid_suffix`, `_state_attr` and the
+    unit/device-class attributes. Each stays unavailable until the device
+    reports its value.
+    """
+
+    _attr_has_entity_name = True
+    _state_attr: str = ""
+    _uid_suffix: str = ""
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_{self._uid_suffix}"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self):
+        return getattr(self._device.state, self._state_attr)
+
+    @property
+    def available(self) -> bool:
+        return self._device.available and getattr(self._device.state, self._state_attr) is not None
+
+
+class DiffuserOilCurrentSensor(_OilFieldSensor):
+    """Current fragrance oil volume in millilitres (AK V3)."""
+
+    _attr_name = "Oil remaining (ml)"
+    _attr_icon = "mdi:cup-water"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "mL"
+    _state_attr = "oil_current_ml"
+    _uid_suffix = "oil_current_ml"
+
+
+class DiffuserOilCapacitySensor(_OilFieldSensor):
+    """Bottle capacity in millilitres (AK V3)."""
+
+    _attr_name = "Oil capacity"
+    _attr_icon = "mdi:cup"
+    _attr_native_unit_of_measurement = "mL"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _state_attr = "oil_max_ml"
+    _uid_suffix = "oil_max_ml"
+
+
+class DiffuserOilConsumptionSensor(_OilFieldSensor):
+    """Fragrance consumption rate in millilitres per hour (AK V3)."""
+
+    _attr_name = "Oil consumption"
+    _attr_icon = "mdi:speedometer"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "mL/h"
+    _state_attr = "oil_consumption_mlh"
+    _uid_suffix = "oil_consumption_mlh"
+
+
+class DiffuserOilDaysSensor(_OilFieldSensor):
+    """Estimated days of fragrance remaining (AK V3)."""
+
+    _attr_name = "Oil days remaining"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_native_unit_of_measurement = "d"
+    _state_attr = "oil_days_remaining"
+    _uid_suffix = "oil_days_remaining"
 
 
 class DiffuserWorkRemainSensor(SensorEntity):

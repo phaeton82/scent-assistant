@@ -158,8 +158,12 @@ The set of entities depends on which device family is connected.
 | Program | Switch | Schedule / program enabled (V3 devices — independent of Power) |
 | Lamp | Switch | Auxiliary LED lamp |
 | Child Lock | Switch | Lock physical buttons |
-| Intensity | Number | Spray intensity (0–10 on V2, 0–20 on V3) |
+| Intensity | Number | Spray intensity / grade (0–10 on V2, 0–20 on V3) |
+| Work / Pause Duration | Number | Custom spray timing (V3 — switches the schedule to Custom mode) |
 | Start Time / End Time | Time | Daily schedule window |
+| Oil remaining | Sensor | Fragrance level percentage (V3 models with an oil sensor) |
+| Oil remaining (ml) / Oil capacity | Sensor | Current and total fragrance volume (V3) |
+| Oil consumption / Oil days remaining | Sensor | Usage rate and estimated days left (V3) |
 
 ---
 

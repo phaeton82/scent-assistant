@@ -590,6 +590,14 @@ class ScentDiffuserDevice:
         if "pause_remaining" in updates:
             self._state.pause_remaining = updates["pause_remaining"]
             changed = True
+        for _oil_field in (
+            "oil_current_ml", "oil_max_ml",
+            "oil_consumption_mlh", "oil_days_remaining",
+            "schedule_custom_mode",
+        ):
+            if _oil_field in updates:
+                setattr(self._state, _oil_field, updates[_oil_field])
+                changed = True
         if "light_on" in updates:
             self._state.light_on = updates["light_on"]
             changed = True
@@ -772,9 +780,13 @@ class ScentDiffuserDevice:
         self._state.intensity = clamped
         self._notify_state_changed()
         # Push the current schedule with the new intensity so the change
-        # is observable on the device immediately.
+        # is observable on the device immediately. Intensity is the
+        # grade in the device's *Level* mode, so a deliberate intensity
+        # change selects Level mode (work/pause come from the device's
+        # grade table). Adjusting Work/Pause Duration switches back to
+        # Custom mode — see `_write_schedule_to_device`.
         if self._ble_address:
-            return await self._write_schedule_to_device()
+            return await self._write_schedule_to_device(custom_mode=False)
         return True
 
     async def set_rgb_color(self, r: int, g: int, b: int) -> bool:
@@ -802,12 +814,13 @@ class ScentDiffuserDevice:
     async def set_work_duration(self, seconds: int) -> bool:
         """Set the spray work duration and write to device."""
         self._state.work_seconds = seconds
-        return await self._write_schedule_to_device()
+        # Setting an explicit duration means the user wants Custom mode.
+        return await self._write_schedule_to_device(custom_mode=True)
 
     async def set_pause_duration(self, seconds: int) -> bool:
         """Set the pause duration and write to device."""
         self._state.pause_seconds = seconds
-        return await self._write_schedule_to_device()
+        return await self._write_schedule_to_device(custom_mode=True)
 
     async def set_schedule(
         self,
@@ -828,9 +841,17 @@ class ScentDiffuserDevice:
         self._state.end_hour = end_hour
         self._state.end_minute = end_minute
 
-        return await self._write_schedule_to_device(weekday_mask=weekday_mask, enabled=enabled)
+        # An explicit work/pause schedule means Custom mode.
+        return await self._write_schedule_to_device(
+            weekday_mask=weekday_mask, enabled=enabled, custom_mode=True,
+        )
 
-    async def _write_schedule_to_device(self, weekday_mask: int | None = None, enabled: bool = True) -> bool:
+    async def _write_schedule_to_device(
+        self,
+        weekday_mask: int | None = None,
+        enabled: bool = True,
+        custom_mode: bool | None = None,
+    ) -> bool:
         """Write the current schedule state to the device.
 
         `weekday_mask=None` (the default for callers like `set_intensity`
@@ -838,6 +859,10 @@ class ScentDiffuserDevice:
         preserves whatever mask was last read back from the device, so a
         one-axis tweak doesn't silently flatten an M-F schedule into
         every-day.
+
+        `custom_mode=None` preserves the device's current V3 schedule mode
+        (Custom vs Level); callers that change Work/Pause pass True, and
+        `set_intensity` passes False. Ignored on non-AK / V2 devices.
         """
         if weekday_mask is None:
             weekday_mask = self._state.weekday_mask if self._state.weekday_mask is not None else 0x7F
@@ -883,9 +908,21 @@ class ScentDiffuserDevice:
                     level = 10
                 else:
                     level = 6
+                # Resolve the V3 schedule mode: preserve the device's
+                # current mode when the caller didn't specify one.
+                if custom_mode is None:
+                    resolved_mode = (
+                        self._state.schedule_custom_mode
+                        if self._state.schedule_custom_mode is not None
+                        else True
+                    )
+                else:
+                    resolved_mode = custom_mode
                 cmd = self._protocol.build_schedule(
                     slot, weekday_mask=weekday_mask, intensity=level,
+                    custom_mode=resolved_mode,
                 )
+                self._state.schedule_custom_mode = resolved_mode
             elif isinstance(self._protocol, AromelyAroMaxProtocol):
                 slot = ScheduleSlot(
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
