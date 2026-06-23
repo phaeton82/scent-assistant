@@ -593,7 +593,7 @@ class ScentDiffuserDevice:
         for _oil_field in (
             "oil_current_ml", "oil_max_ml",
             "oil_consumption_mlh",
-            "schedule_custom_mode",
+            "schedule_custom_mode", "grade_table",
         ):
             if _oil_field in updates:
                 setattr(self._state, _oil_field, updates[_oil_field])
@@ -646,10 +646,11 @@ class ScentDiffuserDevice:
 
         where ``duty = work / (work + pause)``. In Custom mode the work/pause
         durations are the live values, so this is exact. In Level mode the
-        device runs an internal grade→work/pause table we haven't captured for
-        the AK V3 family yet, so we can't know the real duty cycle — days then
-        stays unavailable rather than showing a wrong number (the raw value in
-        the 0x50 frame disagreed with the app: 836 d vs 293 d, @Mins95 #8).
+        device runs an internal grade→work/pause table; we read it from the
+        0x47 frame (C3 query) and index it by the selected intensity. If that
+        table hasn't been read yet, Level-mode days stays unavailable rather
+        than showing a wrong number (the raw value in the 0x50 frame disagreed
+        with the app: 836 d vs 293 d, @Mins95 #8).
 
         Returns True when the stored value changed.
         """
@@ -668,11 +669,19 @@ class ScentDiffuserDevice:
                     minutes += 24 * 60
                 hours = minutes / 60.0
                 # Duty cycle: Custom mode carries the real work/pause; Level
-                # mode needs the device grade table (not captured yet for AK
-                # V3), so we only compute for Custom.
+                # mode uses the device grade table (0x47), indexed by the
+                # selected intensity.
                 work = pause = None
                 if s.schedule_custom_mode and s.work_seconds and s.pause_seconds:
                     work, pause = s.work_seconds, s.pause_seconds
+                elif (
+                    s.schedule_custom_mode is False
+                    and s.grade_table
+                    and s.intensity
+                ):
+                    idx = s.intensity - 1
+                    if 0 <= idx < len(s.grade_table) and s.grade_table[idx]:
+                        work, pause = s.grade_table[idx]
                 if work and pause and hours > 0:
                     duty = work / (work + pause)
                     daily = cons * hours * duty

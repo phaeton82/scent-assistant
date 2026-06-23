@@ -238,9 +238,10 @@ class DiffuserOilDaysSensor(_OilFieldSensor):
 
     Computed in the device layer from current oil, consumption rate, the
     active schedule window and the work/pause duty cycle (matching the
-    official app). Only available in Custom mode — Level mode needs the
-    device grade table, which isn't captured yet, so it stays unavailable
-    there rather than showing the unreliable raw value (@Mins95 #8).
+    official app). Custom mode uses the live work/pause; Level mode looks the
+    duty up in the device grade table (0x47). Stays unavailable only until the
+    inputs (oil, consumption, schedule, and the grade table in Level mode) are
+    known, rather than showing the unreliable raw value (@Mins95 #8).
     """
 
     _attr_name = "Oil days remaining"

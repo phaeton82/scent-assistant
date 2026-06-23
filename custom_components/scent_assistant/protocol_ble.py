@@ -22,6 +22,7 @@ from .const import (
     SM_AK_CMD_V3_READ_SLOT, SM_AK_CMD_V3_READ_LABEL,
     SM_AK_CMD_V3_READ_OIL, SM_AK_CMD_V3_READ_OIL_INFO, SM_AK_CMD_V3_READ_FIRMWARE,
     SM_AK_CMD_V3_READ_CONTROL, SM_AK_CMD_V3_READ_MODEL,
+    SM_AK_CMD_V3_READ_GRADE_TABLE, SM_AK_RESP_GRADE_TABLE,
     SM_AK_RESP_SCHEDULE_V3, SM_AK_RESP_DEVICE_NAME_V3,
     SM_AK_RESP_LABEL_V3, SM_AK_RESP_MODEL_V3,
     SM_AK_CTRL_BIT_ONOFF, SM_AK_CTRL_BIT_FAN, SM_AK_CTRL_BIT_DEMO,
@@ -115,6 +116,11 @@ class DiffuserState:
     # AK V3 schedule mode: True = Custom (work/pause honoured), False =
     # Level (device grade table). None until first read.
     schedule_custom_mode: bool | None = None
+    # AK V3 Level grade table: per-level (work_s, pause_s) the device uses in
+    # Level mode, pushed as a 0x47 frame in response to C3 (@Mins95's #8
+    # decode). Index = intensity - 1. None until read. Used to compute oil
+    # days-remaining in Level mode (Custom mode has the live work/pause).
+    grade_table: list | None = None
     light_on: bool | None = None       # auxiliary LED state
     device_name: str | None = None     # user-set device name (DP 6)
     password_required: bool | None = None  # GW device demands password auth
@@ -1145,6 +1151,10 @@ class ScentMarketingAkProtocol(BleProtocol):
                 # the oil sensors stay null.
                 bytes([SM_AK_CMD_V3_READ_OIL]),
                 bytes([SM_AK_CMD_V3_READ_OIL_INFO]),
+                # Level grade table (@Mins95's #8 decode): C3 → 47 with the
+                # per-level work/pause pairs. Needed to compute oil
+                # days-remaining while the schedule is in Level mode.
+                bytes([SM_AK_CMD_V3_READ_GRADE_TABLE]),
             ]
         return [
             bytes([SM_AK_CMD_READ_DEVICE_NAME]),
@@ -1257,6 +1267,31 @@ class ScentMarketingAkProtocol(BleProtocol):
             consumption = (data[2] << 8) | data[3]
             if consumption > 0:
                 result["oil_consumption_mlh"] = consumption / 100.0
+
+        elif op == SM_AK_RESP_GRADE_TABLE and len(data) >= 5:
+            # V3 Level grade table, response to C3 (@Mins95's #8 decode):
+            #     47 + N×(work_u16-be pause_u16-be)
+            # His SA_Salon (20 levels) returns 20 pairs:
+            #     47 000F012C 000F0096 00140078 … = L1 15/300, L2 15/150,
+            #     L3 20/120, … matching his app's Level 1-20.
+            # N = (len - 1) / 4. The selected intensity indexes this table to
+            # recover the real work/pause the device uses in Level mode, which
+            # lets us compute oil days-remaining there (Custom mode has the
+            # live durations directly).
+            table = []
+            n = (len(data) - 1) // 4
+            for i in range(n):
+                base = 1 + i * 4
+                work = (data[base] << 8) | data[base + 1]
+                pause = (data[base + 2] << 8) | data[base + 3]
+                # Skip implausible entries (uninitialised / junk) but keep the
+                # index aligned to the level by storing None placeholders.
+                if 0 < work <= 0xFFFF and 0 < pause <= 0xFFFF:
+                    table.append((work, pause))
+                else:
+                    table.append(None)
+            if any(t is not None for t in table):
+                result["grade_table"] = table
 
         elif op == 0x83 and len(data) >= 8:
             # V2 schedule slot read-back. Layout matches the write but

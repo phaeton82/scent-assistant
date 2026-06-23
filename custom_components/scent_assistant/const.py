@@ -108,6 +108,7 @@ SM_AK_CMD_V3_READ_OIL_INFO = 0xCE     # CE → 50 <enabled> <consumption×100 u1
 SM_AK_CMD_V3_READ_FIRMWARE = 0xCB     # CB → 44 + PCB version + Equipment version (32 bytes)
 SM_AK_CMD_V3_READ_CONTROL = 0xC4      # C4 → 4D 01 <mask>  (power/fan/lamp/lock bitmask)
 SM_AK_CMD_V3_READ_MODEL = 0xD0        # D0 → 45 + utf8 model code (e.g. "A305M")
+SM_AK_CMD_V3_READ_GRADE_TABLE = 0xC3  # C3 → 47 + N×(work_u16 pause_u16) Level grade table
 
 # Response opcodes (parsed by `parse_notification`):
 SM_AK_RESP_SCHEDULE_V2 = 0x83         # mirrors the V2 read opcode
@@ -117,6 +118,7 @@ SM_AK_RESP_LABEL_V3 = 0x48            # response to C7
 SM_AK_RESP_MODEL_V3 = 0x45            # response to D0
 SM_AK_RESP_FIRMWARE_V3 = 0x44         # response to CB (same opcode as our existing V2 parser)
 SM_AK_RESP_CONTROL = 0x4D             # control bitmask push/read (V2: 4D mask, V3: 4D 01 mask)
+SM_AK_RESP_GRADE_TABLE = 0x47         # response to C3: 47 + N×(work_u16 pause_u16), @Mins95 #8
 
 # AK control-state bitmask layout (LSB = onOff). Mirrors writeTotalControl()
 # which builds a binary string "lock|lamp|1|demo|fan|onOff" → int(s, 2).

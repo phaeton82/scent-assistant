@@ -48,6 +48,7 @@ async def async_get_config_entry_diagnostics(
             "oil_consumption_mlh": s.oil_consumption_mlh,
             "oil_days_remaining": s.oil_days_remaining,
             "schedule_custom_mode": s.schedule_custom_mode,
+            "grade_table": s.grade_table,
             "work_remaining": s.work_remaining,
             "pause_remaining": s.pause_remaining,
             "lock": s.lock,
