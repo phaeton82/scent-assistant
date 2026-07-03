@@ -1,0 +1,194 @@
+From a8531447d3dd9f34e81c9a778aea2c8125a644dd Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Fri, 3 Jul 2026 20:58:27 +0000
+Subject: [PATCH] Decode Yooai status push (power/fan/lock) and query it on
+ connect
+
+- Confirmed via clean step-by-step capture: 0x21 status frame byte 4 is
+  a bitmask (bit0=Power, bit1=Fan, bit2=Lock); bit3 looked transient
+  (startup-only) and isn't mapped.
+- build_query() now sends the 0x08 frame that triggers this status push
+  (was previously just resending the idle heartbeat).
+- Send it right after the handshake on every connect, so HA shows real
+  Power/Fan/Lock state instead of 'unknown' until the user first toggles
+  something.
+- Remove Start/End Time, Work/Pause Duration, Time Sync button, and the
+  Lamp switch for Yooai devices: none of these have a working backend
+  implementation yet (schedule format undecoded), so they were dead UI.
+---
+ custom_components/scent_assistant/button.py   |  6 +++-
+ custom_components/scent_assistant/const.py    |  4 +++
+ custom_components/scent_assistant/device.py   |  6 ++++
+ custom_components/scent_assistant/number.py   | 14 +++++++---
+ .../scent_assistant/protocol_ble.py           | 28 +++++++++++++++----
+ custom_components/scent_assistant/switch.py   |  7 ++---
+ custom_components/scent_assistant/time.py     |  4 +++
+ 7 files changed, 54 insertions(+), 15 deletions(-)
+
+diff --git a/custom_components/scent_assistant/button.py b/custom_components/scent_assistant/button.py
+index 52d6772..1819699 100644
+--- a/custom_components/scent_assistant/button.py
++++ b/custom_components/scent_assistant/button.py
+@@ -24,7 +24,11 @@ async def async_setup_entry(
+     if device.device_type == DeviceType.SCENTIMENT:
+         return
+ 
+-    entities: list[ButtonEntity] = [TimeSyncButton(device, entry)]
++    entities: list[ButtonEntity] = []
++    # Time sync isn't implemented for Yooai devices yet (no confirmed
++    # frame format), so the button would silently do nothing.
++    if device.device_type != DeviceType.YOOAI_BLE:
++        entities.append(TimeSyncButton(device, entry))
+     # Momentary diffusion is power-on + delayed power-off, which only
+     # makes sense on families where power is a plain on/off (Aroma-Link,
+     # Yooai — confirmed on real hardware that Power = immediate mist).
+diff --git a/custom_components/scent_assistant/const.py b/custom_components/scent_assistant/const.py
+index ed50b66..d228dcf 100644
+--- a/custom_components/scent_assistant/const.py
++++ b/custom_components/scent_assistant/const.py
+@@ -95,6 +95,10 @@ YOOAI_TRAILER = 0x5A
+ YOOAI_TYPE_OPERATION = 0x07
+ # Sent standalone (no data) every few seconds to keep the connection alive.
+ YOOAI_TYPE_HEARTBEAT = 0xA1
++# Sent standalone (no data) to request an immediate 0x21 status push
++# (power/fan/lock bitmask) plus a 0x88 schedule-slot blob. Confirmed in
++# a clean capture: sent once right after the initial info handshake.
++YOOAI_TYPE_QUERY_STATUS = 0x08
+ 
+ # Sub-commands used with YOOAI_TYPE_OPERATION. Confirmed against both a
+ # real device (manual field-test) and the decompiled app's DeviceVo
+diff --git a/custom_components/scent_assistant/device.py b/custom_components/scent_assistant/device.py
+index e652756..1e20cf6 100644
+--- a/custom_components/scent_assistant/device.py
++++ b/custom_components/scent_assistant/device.py
+@@ -432,6 +432,12 @@ class ScentDiffuserDevice:
+                     try:
+                         await self._ble_send(self._protocol.build_handshake())
+                         await asyncio.sleep(0.2)
++                        # Ask the device to push back its current
++                        # power/fan/lock status so HA doesn't start every
++                        # session showing "unknown" until the user first
++                        # touches a switch.
++                        await self._ble_send(self._protocol.build_query())
++                        await asyncio.sleep(0.3)
+                     except (BleakError, asyncio.TimeoutError, OSError) as err:
+                         _LOGGER.warning(
+                             "Yooai handshake failed on %s: %s",
+diff --git a/custom_components/scent_assistant/number.py b/custom_components/scent_assistant/number.py
+index 6755cd3..6fc408a 100644
+--- a/custom_components/scent_assistant/number.py
++++ b/custom_components/scent_assistant/number.py
+@@ -27,10 +27,16 @@ async def async_setup_entry(
+         async_add_entities([ScentimentLevelNumber(device, entry)])
+         return
+ 
+-    entities: list[NumberEntity] = [
+-        WorkDurationNumber(device, entry),
+-        PauseDurationNumber(device, entry),
+-    ]
++    entities: list[NumberEntity] = []
++    # Work/Pause Duration write a schedule slot — not implemented yet for
++    # Yooai devices (the 5-mode "Working mode" schedule format hasn't been
++    # decoded), so these would silently do nothing. Left out until that's
++    # built rather than showing controls that don't work.
++    if device.device_type != DeviceType.YOOAI_BLE:
++        entities.extend([
++            WorkDurationNumber(device, entry),
++            PauseDurationNumber(device, entry),
++        ])
+     if device.device_type == DeviceType.SCENT_MARKETING_AK:
+         entities.append(ScentMarketingIntensityNumber(device, entry))
+     if device.device_type == DeviceType.AROMA_LINK:
+diff --git a/custom_components/scent_assistant/protocol_ble.py b/custom_components/scent_assistant/protocol_ble.py
+index 5bb5a90..945708a 100644
+--- a/custom_components/scent_assistant/protocol_ble.py
++++ b/custom_components/scent_assistant/protocol_ble.py
+@@ -67,7 +67,7 @@ from .const import (
+     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
+     YOOAI_SERVICE_UUID, YOOAI_CHAR_UUID,
+     YOOAI_HEADER, YOOAI_TRAILER,
+-    YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT,
++    YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT, YOOAI_TYPE_QUERY_STATUS,
+     YOOAI_OP_A, YOOAI_OP_B, YOOAI_OP_LOCK, YOOAI_OP_LIGHT,
+ )
+ 
+@@ -2084,9 +2084,11 @@ class YooaiBleProtocol(BleProtocol):
+         return self._build_operation(YOOAI_OP_LIGHT, 1 if on else 0)
+ 
+     def build_query(self) -> bytes:
+-        # No dedicated "query all" was identified yet; the heartbeat frame
+-        # is harmless to send and keeps the connection/state flowing.
+-        return self._build_frame(YOOAI_TYPE_HEARTBEAT)
++        # Confirmed in a clean capture: this standalone frame (no data)
++        # makes the device push back a 0x21 status frame (power/fan/lock)
++        # plus a 0x88 schedule blob — this is what the official app sends
++        # right after connecting to populate its UI with real state.
++        return self._build_frame(YOOAI_TYPE_QUERY_STATUS)
+ 
+     def build_handshake(self) -> bytes:
+         """Initial frame the official app sends right after connecting.
+@@ -2112,10 +2114,24 @@ class YooaiBleProtocol(BleProtocol):
+             return result
+         type_byte = data[3]
+         payload = data[4:3 + length]
+-        # Generic short ACK (type 0x02) — connectivity confirmation only;
+-        # doesn't carry decoded state yet.
+         if type_byte == 0x02 and len(payload) >= 1:
++            # Generic short ACK — connectivity confirmation only.
+             result["_ack"] = payload.hex()
++        elif type_byte == 0x21 and len(payload) >= 5:
++            # Status push, sent after every operation() write and
++            # periodically. Byte 4 of the payload is a bitmask confirmed
++            # against a clean, step-by-step capture (power/fan/lock
++            # toggled one at a time with a known device.py protocol
++            # under test): bit0=Power, bit1=Fan, bit2=Lock. Bit3 was seen
++            # set only in the single push right after a power-on and
++            # cleared in every later push — looks like a transient
++            # startup/priming flag rather than steady-state info, so it
++            # isn't mapped to a field yet.
++            status = payload[4]
++            result["power"] = bool(status & 0x01)
++            result["fan"] = bool(status & 0x02)
++            result["lock"] = bool(status & 0x04)
++            result["phase"] = "idle" if result["power"] else "off"
+         return result
+ 
+ 
+diff --git a/custom_components/scent_assistant/switch.py b/custom_components/scent_assistant/switch.py
+index f422633..d9b8a8a 100644
+--- a/custom_components/scent_assistant/switch.py
++++ b/custom_components/scent_assistant/switch.py
+@@ -51,12 +51,11 @@ async def async_setup_entry(
+             # which only resolves after the first BLE login.
+             entities.append(DiffuserScheduleSwitch(device, entry))
+ 
+-    # Yooai ("Scent Tech" app) — child lock and auxiliary light are
+-    # confirmed opcodes in the decompiled app (DeviceVo.isLock/isLight).
+-    # Light isn't confirmed present on every SKU; harmless to expose.
++    # Yooai ("Scent Tech" app) — child lock is confirmed working (opcode
++    # 0x11, verified in a clean capture). Light (0x15) is left out for
++    # now — not confirmed present on the NAMSTE SKU and untested.
+     if device.device_type == DeviceType.YOOAI_BLE and not is_cloud:
+         entities.append(DiffuserLockSwitch(device, entry))
+-        entities.append(DiffuserLampSwitch(device, entry))
+ 
+     async_add_entities(entities)
+ 
+diff --git a/custom_components/scent_assistant/time.py b/custom_components/scent_assistant/time.py
+index 01beda7..366d085 100644
+--- a/custom_components/scent_assistant/time.py
++++ b/custom_components/scent_assistant/time.py
+@@ -24,6 +24,10 @@ async def async_setup_entry(
+     device: ScentDiffuserDevice = hass.data[DOMAIN][entry.entry_id]
+     if device.device_type == DeviceType.SCENTIMENT:
+         return
++    # Same reasoning as number.py: the schedule write format for Yooai
++    # devices isn't decoded yet, so Start/End Time would be no-ops.
++    if device.device_type == DeviceType.YOOAI_BLE:
++        return
+ 
+     async_add_entities([
+         DiffuserStartTime(device, entry),
+-- 
+2.43.0
+

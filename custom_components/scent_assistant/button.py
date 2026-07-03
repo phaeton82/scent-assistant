@@ -24,7 +24,11 @@ async def async_setup_entry(
     if device.device_type == DeviceType.SCENTIMENT:
         return
 
-    entities: list[ButtonEntity] = [TimeSyncButton(device, entry)]
+    entities: list[ButtonEntity] = []
+    # Time sync isn't implemented for Yooai devices yet (no confirmed
+    # frame format), so the button would silently do nothing.
+    if device.device_type != DeviceType.YOOAI_BLE:
+        entities.append(TimeSyncButton(device, entry))
     # Momentary diffusion is power-on + delayed power-off, which only
     # makes sense on families where power is a plain on/off (Aroma-Link,
     # Yooai — confirmed on real hardware that Power = immediate mist).

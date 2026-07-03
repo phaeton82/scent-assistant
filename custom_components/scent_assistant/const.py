@@ -95,6 +95,10 @@ YOOAI_TRAILER = 0x5A
 YOOAI_TYPE_OPERATION = 0x07
 # Sent standalone (no data) every few seconds to keep the connection alive.
 YOOAI_TYPE_HEARTBEAT = 0xA1
+# Sent standalone (no data) to request an immediate 0x21 status push
+# (power/fan/lock bitmask) plus a 0x88 schedule-slot blob. Confirmed in
+# a clean capture: sent once right after the initial info handshake.
+YOOAI_TYPE_QUERY_STATUS = 0x08
 
 # Sub-commands used with YOOAI_TYPE_OPERATION. Confirmed against both a
 # real device (manual field-test) and the decompiled app's DeviceVo

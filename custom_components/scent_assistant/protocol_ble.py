@@ -67,7 +67,7 @@ from .const import (
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
     YOOAI_SERVICE_UUID, YOOAI_CHAR_UUID,
     YOOAI_HEADER, YOOAI_TRAILER,
-    YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT,
+    YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT, YOOAI_TYPE_QUERY_STATUS,
     YOOAI_OP_A, YOOAI_OP_B, YOOAI_OP_LOCK, YOOAI_OP_LIGHT,
 )
 
@@ -2084,9 +2084,11 @@ class YooaiBleProtocol(BleProtocol):
         return self._build_operation(YOOAI_OP_LIGHT, 1 if on else 0)
 
     def build_query(self) -> bytes:
-        # No dedicated "query all" was identified yet; the heartbeat frame
-        # is harmless to send and keeps the connection/state flowing.
-        return self._build_frame(YOOAI_TYPE_HEARTBEAT)
+        # Confirmed in a clean capture: this standalone frame (no data)
+        # makes the device push back a 0x21 status frame (power/fan/lock)
+        # plus a 0x88 schedule blob — this is what the official app sends
+        # right after connecting to populate its UI with real state.
+        return self._build_frame(YOOAI_TYPE_QUERY_STATUS)
 
     def build_handshake(self) -> bytes:
         """Initial frame the official app sends right after connecting.
@@ -2112,10 +2114,24 @@ class YooaiBleProtocol(BleProtocol):
             return result
         type_byte = data[3]
         payload = data[4:3 + length]
-        # Generic short ACK (type 0x02) — connectivity confirmation only;
-        # doesn't carry decoded state yet.
         if type_byte == 0x02 and len(payload) >= 1:
+            # Generic short ACK — connectivity confirmation only.
             result["_ack"] = payload.hex()
+        elif type_byte == 0x21 and len(payload) >= 5:
+            # Status push, sent after every operation() write and
+            # periodically. Byte 4 of the payload is a bitmask confirmed
+            # against a clean, step-by-step capture (power/fan/lock
+            # toggled one at a time with a known device.py protocol
+            # under test): bit0=Power, bit1=Fan, bit2=Lock. Bit3 was seen
+            # set only in the single push right after a power-on and
+            # cleared in every later push — looks like a transient
+            # startup/priming flag rather than steady-state info, so it
+            # isn't mapped to a field yet.
+            status = payload[4]
+            result["power"] = bool(status & 0x01)
+            result["fan"] = bool(status & 0x02)
+            result["lock"] = bool(status & 0x04)
+            result["phase"] = "idle" if result["power"] else "off"
         return result
 
 

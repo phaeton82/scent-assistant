@@ -51,12 +51,11 @@ async def async_setup_entry(
             # which only resolves after the first BLE login.
             entities.append(DiffuserScheduleSwitch(device, entry))
 
-    # Yooai ("Scent Tech" app) — child lock and auxiliary light are
-    # confirmed opcodes in the decompiled app (DeviceVo.isLock/isLight).
-    # Light isn't confirmed present on every SKU; harmless to expose.
+    # Yooai ("Scent Tech" app) — child lock is confirmed working (opcode
+    # 0x11, verified in a clean capture). Light (0x15) is left out for
+    # now — not confirmed present on the NAMSTE SKU and untested.
     if device.device_type == DeviceType.YOOAI_BLE and not is_cloud:
         entities.append(DiffuserLockSwitch(device, entry))
-        entities.append(DiffuserLampSwitch(device, entry))
 
     async_add_entities(entities)
 

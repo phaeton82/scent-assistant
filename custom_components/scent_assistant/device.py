@@ -432,6 +432,12 @@ class ScentDiffuserDevice:
                     try:
                         await self._ble_send(self._protocol.build_handshake())
                         await asyncio.sleep(0.2)
+                        # Ask the device to push back its current
+                        # power/fan/lock status so HA doesn't start every
+                        # session showing "unknown" until the user first
+                        # touches a switch.
+                        await self._ble_send(self._protocol.build_query())
+                        await asyncio.sleep(0.3)
                     except (BleakError, asyncio.TimeoutError, OSError) as err:
                         _LOGGER.warning(
                             "Yooai handshake failed on %s: %s",

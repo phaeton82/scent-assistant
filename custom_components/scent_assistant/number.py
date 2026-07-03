@@ -27,10 +27,16 @@ async def async_setup_entry(
         async_add_entities([ScentimentLevelNumber(device, entry)])
         return
 
-    entities: list[NumberEntity] = [
-        WorkDurationNumber(device, entry),
-        PauseDurationNumber(device, entry),
-    ]
+    entities: list[NumberEntity] = []
+    # Work/Pause Duration write a schedule slot — not implemented yet for
+    # Yooai devices (the 5-mode "Working mode" schedule format hasn't been
+    # decoded), so these would silently do nothing. Left out until that's
+    # built rather than showing controls that don't work.
+    if device.device_type != DeviceType.YOOAI_BLE:
+        entities.extend([
+            WorkDurationNumber(device, entry),
+            PauseDurationNumber(device, entry),
+        ])
     if device.device_type == DeviceType.SCENT_MARKETING_AK:
         entities.append(ScentMarketingIntensityNumber(device, entry))
     if device.device_type == DeviceType.AROMA_LINK:
