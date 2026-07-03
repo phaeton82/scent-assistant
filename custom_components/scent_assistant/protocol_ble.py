@@ -2091,16 +2091,29 @@ class YooaiBleProtocol(BleProtocol):
         return self._build_frame(YOOAI_TYPE_QUERY_STATUS)
 
     def build_handshake(self) -> bytes:
-        """Initial frame the official app sends right after connecting.
-
-        Confirmed in the decompiled app: `onState()` calls
-        `BleUtils.writeFunction(71)` (0x47) as the very first write on
-        every connect, before any other command. Without it the device
-        ACKs `operation()` writes at the GATT layer but silently ignores
-        them — commands appear to succeed in HA but nothing happens on
-        the physical diffuser.
-        """
+        """First frame the official app sends right after connecting."""
         return self._build_frame(0x47)
+
+    def build_init_sequence(self) -> list[bytes]:
+        """Full connect-time initialization mirroring the official app.
+
+        A shorter version of this (just handshake + status query) looked
+        sufficient from a single capture, but a follow-up debug session
+        showed the device silently ignores a bare 0x08 query — it only
+        answers with a 0x21 status push when preceded by this exact
+        chain, confirmed identically across two independent captures:
+        0x47 -> 0x09[01,00] -> 0x51 -> 0x06[4 bytes] -> 0x08. The 0x06
+        payload appears to be session-specific in the real app (differed
+        between captures) but doesn't seem to be validated — zero bytes
+        work fine here.
+        """
+        return [
+            self._build_frame(0x47),
+            self._build_frame(0x09, bytes([0x01, 0x00])),
+            self._build_frame(0x51),
+            self._build_frame(0x06, bytes([0x00, 0x00, 0x00, 0x00])),
+            self._build_frame(0x08),
+        ]
 
     def supports_fan(self) -> bool:
         return True

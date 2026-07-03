@@ -431,13 +431,11 @@ class ScentDiffuserDevice:
                 # the switch flipping but nothing happened physically.
                 if isinstance(self._protocol, YooaiBleProtocol):
                     try:
-                        await self._ble_send(self._protocol.build_handshake())
-                        await asyncio.sleep(0.2)
-                        # Ask the device to push back its current
-                        # power/fan/lock status so HA doesn't start every
-                        # session showing "unknown" until the user first
-                        # touches a switch.
-                        await self._ble_send(self._protocol.build_query())
+                        for frame in self._protocol.build_init_sequence():
+                            await self._ble_send(frame)
+                            await asyncio.sleep(0.2)
+                        # Give the final 0x08 query's 0x21 status response
+                        # a moment to arrive and be parsed.
                         await asyncio.sleep(0.3)
                     except (BleakError, asyncio.TimeoutError, OSError) as err:
                         _LOGGER.warning(
@@ -1096,7 +1094,18 @@ class ScentDiffuserDevice:
         if self._ble_address:
             if await self._ble_connect():
                 try:
-                    await self._ble_send(self._protocol.build_query())
+                    if isinstance(self._protocol, YooaiBleProtocol):
+                        # A bare 0x08 query only gets answered when
+                        # preceded by the rest of the init chain — resend
+                        # it here too, since _ble_connect() skips its own
+                        # copy when the connection is already open (e.g.
+                        # a startup retry reusing a connection from a
+                        # few seconds earlier).
+                        for frame in self._protocol.build_init_sequence():
+                            await self._ble_send(frame)
+                            await asyncio.sleep(0.2)
+                    else:
+                        await self._ble_send(self._protocol.build_query())
                     await asyncio.sleep(1.0)
                     # Some protocols expose extra read-registers that the
                     # device only reports on demand (e.g. Aroma-Link's oil
