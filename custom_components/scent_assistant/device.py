@@ -33,6 +33,7 @@ from .protocol_ble import (
     ScentMarketingGwProtocol,
     ScentMarketingGwXorProtocol,
     AromelyAroMaxProtocol,
+    YooaiBleProtocol,
     get_protocol,
     detect_device_type,
 )
@@ -173,6 +174,7 @@ class ScentDiffuserDevice:
             DeviceType.SCENT_MARKETING_GW: "Scent Marketing (GW)",
             DeviceType.SCENT_MARKETING_GW_XOR: "Scent Marketing (GW, encrypted)",
             DeviceType.AROMELY_ARO_MAX: "Aromely Aro Max",
+            DeviceType.YOOAI_BLE: "Yooai / Scent Tech",
         }
         base = mapping.get(self._device_type, self._device_type.value)
         # Append the PID when known — different OEMs share the same family
@@ -761,7 +763,7 @@ class ScentDiffuserDevice:
         if not self._ble_address:
             return False
         proto = self._protocol
-        if isinstance(proto, (AromaLinkBleProtocol, ScentMarketingAkProtocol, AromelyAroMaxProtocol)):
+        if isinstance(proto, (AromaLinkBleProtocol, ScentMarketingAkProtocol, AromelyAroMaxProtocol, YooaiBleProtocol)):
             cmd = proto.build_fan(on)
             if await self._ble_execute(cmd):
                 self._state.fan = on

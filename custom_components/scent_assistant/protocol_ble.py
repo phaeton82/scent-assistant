@@ -65,6 +65,10 @@ from .const import (
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
     AL_SLOT_ENABLED, AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
+    YOOAI_SERVICE_UUID, YOOAI_CHAR_UUID,
+    YOOAI_HEADER, YOOAI_TRAILER,
+    YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT,
+    YOOAI_OP_A, YOOAI_OP_B,
 )
 
 import json
@@ -2014,6 +2018,82 @@ class ScentMarketingGwXorProtocol(ScentMarketingGwProtocol):
 
 
 # ---------------------------------------------------------------------------
+# Yooai BLE ("Scent Tech" app — com.yooai.scentlife)
+# ---------------------------------------------------------------------------
+
+class YooaiBleProtocol(BleProtocol):
+    """BLE protocol for Yooai/"Scent Tech"-app diffusers (e.g. NAMSTE).
+
+    Decoded from the decompiled `com.yooai.ble.utils.BleUtils` class and
+    confirmed against a real HCI snoop capture. Single GATT characteristic
+    (FFE1) is used for both writes and notifications.
+
+    Frame: 55 AA <len> <type> <data...> <checksum> 5A
+      len = 1 (type byte) + len(data)
+      checksum = 256 - (sum(header+len+type+data) % 256), 0 if already
+                 a multiple of 256 (mirrors BleUtils.checksum()).
+
+    NOTE: full status read-back (oil level, schedule, etc.) has not been
+    decoded yet — only power/fan control and the connection heartbeat are
+    implemented so far. `parse_notification()` only recognises a plain ACK;
+    everything else is left for a future capture/decode pass.
+    """
+
+    device_type = DeviceType.YOOAI_BLE
+    service_uuid = YOOAI_SERVICE_UUID
+    write_char_uuid = YOOAI_CHAR_UUID
+    notify_char_uuid = YOOAI_CHAR_UUID  # same characteristic for both
+
+    @staticmethod
+    def _checksum(data: bytes) -> int:
+        total = sum(data) % 256
+        return 0 if total == 0 else 256 - total
+
+    @classmethod
+    def _build_frame(cls, type_byte: int, data: bytes = b"") -> bytes:
+        header_len_type = YOOAI_HEADER + bytes([1 + len(data), type_byte])
+        body = header_len_type + data
+        checksum = cls._checksum(body)
+        return body + bytes([checksum, YOOAI_TRAILER])
+
+    @classmethod
+    def _build_operation(cls, subcmd: int, value: int) -> bytes:
+        return cls._build_frame(YOOAI_TYPE_OPERATION, bytes([subcmd, value, 0x00]))
+
+    def build_power(self, on: bool) -> bytes:
+        # TODO: confirm against real hardware whether YOOAI_OP_A or
+        # YOOAI_OP_B is Power vs. Fan — both were seen toggled 0/1 in the
+        # captured traffic but which switch is which wasn't isolated yet.
+        return self._build_operation(YOOAI_OP_A, 1 if on else 0)
+
+    def build_fan(self, on: bool) -> bytes:
+        return self._build_operation(YOOAI_OP_B, 1 if on else 0)
+
+    def build_query(self) -> bytes:
+        # No dedicated "query all" was identified yet; the heartbeat frame
+        # is harmless to send and keeps the connection/state flowing.
+        return self._build_frame(YOOAI_TYPE_HEARTBEAT)
+
+    def supports_fan(self) -> bool:
+        return True
+
+    def parse_notification(self, data: bytes) -> dict:
+        result: dict = {}
+        if len(data) < 6 or data[0:2] != YOOAI_HEADER or data[-1] != YOOAI_TRAILER:
+            return result
+        length = data[2]
+        if len(data) < 3 + length + 2:
+            return result
+        type_byte = data[3]
+        payload = data[4:3 + length]
+        # Generic short ACK (type 0x02) — connectivity confirmation only;
+        # doesn't carry decoded state yet.
+        if type_byte == 0x02 and len(payload) >= 1:
+            result["_ack"] = payload.hex()
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -2042,6 +2122,8 @@ def get_protocol(
         return ScentMarketingGwXorProtocol(mac=mac, tuya_dp_mode=tuya)
     elif device_type == DeviceType.AROMELY_ARO_MAX:
         return AromelyAroMaxProtocol()
+    elif device_type == DeviceType.YOOAI_BLE:
+        return YooaiBleProtocol()
     raise ValueError(f"Unknown device type: {device_type}")
 
 

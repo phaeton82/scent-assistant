@@ -15,6 +15,7 @@ class DeviceType(StrEnum):
     SCENT_MARKETING_GW = "scent_marketing_gw"          # Scent Marketing app, GW family (EE01 service, framed DP protocol)
     SCENT_MARKETING_GW_XOR = "scent_marketing_gw_xor"  # Scent Marketing app, GW family with XOR-encrypted JSON payload
     AROMELY_ARO_MAX = "aromely_aro_max"                # Aromely Aro Max (FFE0 service, 55-framed register protocol)
+    YOOAI_BLE = "yooai_ble"                            # Yooai/Scent Tech app family (FFE0 service, single FFE1 R/W/N char)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,38 @@ AROMELY_REG_INFO = 0xDB         # device flags (read)
 AROMELY_REG_LABEL = 0xDC        # note/label (read)
 AROMELY_REG_SCHED1 = 0xF1       # schedule slot 1 incl. enabled flag (read)
 AROMELY_REG_SCHED_ALL = 0xF2    # all four schedule slots (read)
+
+# ---------------------------------------------------------------------------
+# Yooai BLE protocol (com.yooai.scentlife / "Scent Tech" app)
+# ---------------------------------------------------------------------------
+# Decoded from the decompiled com.yooai.ble.utils.BleUtils class (bundled in
+# the "Scent Tech" app, package com.yooai.scentlife). Confirmed against a
+# real HCI snoop capture from a NAMSTE-branded 400ml diffuser advertising as
+# "Scent-<serial>". Single GATT characteristic (FFE1) handles both writes
+# and notifications — unlike Aroma-Link (FFF1/FFF2 split) or Aromely
+# (FFE1/FFE2 split).
+YOOAI_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+YOOAI_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+
+# Frame: 55 AA <len> <type> <data...> <checksum> 5A
+# len = 1 (type byte) + len(data)
+# checksum = 256 - (sum(0x55, 0xAA, len, type, *data) % 256), or 0 if that
+# sum is already a multiple of 256 (mirrors BleUtils.checksum()/getBytes()).
+YOOAI_HEADER = bytes([0x55, 0xAA])
+YOOAI_TRAILER = 0x5A
+
+# "operation" wrapper type used for simple 3-byte [subcmd, value, 0] writes
+# (BleUtils.operation(byte,byte) always calls getBytes(arr, (byte)7)).
+YOOAI_TYPE_OPERATION = 0x07
+# Sent standalone (no data) every few seconds to keep the connection alive.
+YOOAI_TYPE_HEARTBEAT = 0xA1
+
+# Sub-commands used with YOOAI_TYPE_OPERATION, confirmed present in an HCI
+# capture toggling the device's two switches. Which physical switch (power
+# vs. fan) each one maps to was not yet confirmed against the real hardware
+# at the time of writing — verify with a live device and swap if reversed.
+YOOAI_OP_A = 0x12
+YOOAI_OP_B = 0x10
 
 # AK command opcodes (mirrors com.IAA360.ChengHao.Device.Data.BtDataModel).
 # Negative bytes in the Java source are decoded to their 0..255 equivalents.
@@ -198,6 +231,11 @@ BLE_NAME_PATTERNS = {
     # are detected via the AF30 service / manufacturer data instead, but
     # some expose "DiffuserAroMax" directly — match that as a fallback.
     DeviceType.AROMELY_ARO_MAX: ["DiffuserAroMax", "DiffuserAro"],
+    # "Scent-" (hyphen, followed by a serial) — Yooai/"Scent Tech" app family.
+    # Distinct from the "Scent " (space) Aroma-Link pattern above; devices in
+    # this family use a completely different GATT layout (single FFE1
+    # characteristic) and protocol, so don't merge these patterns.
+    DeviceType.YOOAI_BLE: ["Scent-"],
 }
 
 # Scent Marketing devices are identified primarily by manufacturer-specific
