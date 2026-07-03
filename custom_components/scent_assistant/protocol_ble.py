@@ -2074,6 +2074,18 @@ class YooaiBleProtocol(BleProtocol):
         # is harmless to send and keeps the connection/state flowing.
         return self._build_frame(YOOAI_TYPE_HEARTBEAT)
 
+    def build_handshake(self) -> bytes:
+        """Initial frame the official app sends right after connecting.
+
+        Confirmed in the decompiled app: `onState()` calls
+        `BleUtils.writeFunction(71)` (0x47) as the very first write on
+        every connect, before any other command. Without it the device
+        ACKs `operation()` writes at the GATT layer but silently ignores
+        them — commands appear to succeed in HA but nothing happens on
+        the physical diffuser.
+        """
+        return self._build_frame(0x47)
+
     def supports_fan(self) -> bool:
         return True
 

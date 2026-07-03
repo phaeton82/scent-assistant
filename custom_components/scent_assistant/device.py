@@ -422,6 +422,25 @@ class ScentDiffuserDevice:
                         self._ble_last_failure_ts = loop.time()
                         return False
 
+                # Yooai ("Scent Tech" app) — the official app sends a
+                # single handshake frame (type 0x47) immediately after
+                # connecting. Without it, operation() writes (power/fan)
+                # ACK at the GATT layer but the device silently ignores
+                # them — confirmed against a real device where HA showed
+                # the switch flipping but nothing happened physically.
+                if isinstance(self._protocol, YooaiBleProtocol):
+                    try:
+                        await self._ble_send(self._protocol.build_handshake())
+                        await asyncio.sleep(0.2)
+                    except (BleakError, asyncio.TimeoutError, OSError) as err:
+                        _LOGGER.warning(
+                            "Yooai handshake failed on %s: %s",
+                            self._ble_name, err,
+                        )
+                        await self._teardown_ble_client()
+                        self._ble_last_failure_ts = loop.time()
+                        return False
+
                 # Time sync on first connection of this session (skipped for
                 # protocols that don't support it).
                 if not self._ble_has_synced_time:
