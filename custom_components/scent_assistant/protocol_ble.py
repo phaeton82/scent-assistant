@@ -1151,10 +1151,6 @@ class ScentMarketingAkProtocol(BleProtocol):
                 # the oil sensors stay null.
                 bytes([SM_AK_CMD_V3_READ_OIL]),
                 bytes([SM_AK_CMD_V3_READ_OIL_INFO]),
-                # Level grade table (@Mins95's #8 decode): C3 → 47 with the
-                # per-level work/pause pairs. Needed to compute oil
-                # days-remaining while the schedule is in Level mode.
-                bytes([SM_AK_CMD_V3_READ_GRADE_TABLE]),
             ]
         return [
             bytes([SM_AK_CMD_READ_DEVICE_NAME]),
@@ -1162,6 +1158,21 @@ class ScentMarketingAkProtocol(BleProtocol):
             bytes([SM_AK_CMD_READ_FIRMWARE]),
             bytes([SM_AK_CMD_READ_EQUIPMENT]),
         ]
+
+    def build_grade_table_query(self) -> bytes:
+        """C3 query for the V3 Level grade table (→ 0x47).
+
+        Sent on its own, *immediately after* the schedule read-back and
+        *before* the label / oil / firmware reads — this mirrors the official
+        app's order. @Mins95's #8 test showed the ordering is load-bearing:
+        with C3 at the tail of the state queries (after the oil reads) his
+        A305M sent C3 but never returned the 47 table; sent right after the
+        schedule read (once the 4A/43 push has drained) it comes back and
+        parses. Empty for V2 / pre-login (no grade table there).
+        """
+        if self.is_v3:
+            return bytes([SM_AK_CMD_V3_READ_GRADE_TABLE])
+        return b""
 
     # ------------------------------------------------------------------
     # On-wire framing

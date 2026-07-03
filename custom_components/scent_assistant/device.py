@@ -365,6 +365,19 @@ class ScentDiffuserDevice:
                         for frame in self._protocol.build_read_schedule_queries():
                             await self._ble_send(frame)
                             await asyncio.sleep(0.15)
+                        # Grade table (C3 → 47): the device only returns it
+                        # when asked right after the schedule read-back has
+                        # finished — mirroring the official app — and before
+                        # the label/oil/firmware reads. Let the 4A/43 schedule
+                        # push drain first, then ask, then let the 47 land.
+                        # Ordering + settle time are load-bearing here
+                        # (@Mins95's #8 test: C3 after the oil reads returned
+                        # no table; C3 here does).
+                        grade_query = self._protocol.build_grade_table_query()
+                        if grade_query:
+                            await asyncio.sleep(0.5)
+                            await self._ble_send(grade_query)
+                            await asyncio.sleep(0.4)
                         for frame in self._protocol.build_read_state_queries():
                             await self._ble_send(frame)
                             await asyncio.sleep(0.15)
