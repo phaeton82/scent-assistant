@@ -128,6 +128,7 @@ class ScentDiffuserDevice:
         # auto-off after this many seconds via a background task.
         self.momentary_seconds: int = DEFAULT_MOMENTARY_SECONDS
         self._momentary_task: asyncio.Task | None = None
+        self._startup_retry_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -1148,13 +1149,38 @@ class ScentDiffuserDevice:
     # ------------------------------------------------------------------
 
     async def async_setup(self) -> None:
-        """Initial setup - query state once."""
+        """Initial setup - query state once, then keep trying briefly.
+
+        Right at HA startup the bluetooth integration may not have
+        (re)discovered this device yet, so the very first connect attempt
+        can fail even though the device is perfectly reachable a few
+        seconds later. Do one immediate attempt inline (so entry setup
+        still gets a state if the device is already visible), then hand
+        off a few delayed retries to a background task rather than
+        blocking config entry setup for up to ~17 seconds.
+        """
         await self.refresh_state()
+        if not self._ble_address or self._state.power is not None:
+            return
+        self._startup_retry_task = asyncio.ensure_future(self._startup_retry_query())
+
+    async def _startup_retry_query(self) -> None:
+        for attempt, delay in enumerate((2, 5, 10), start=1):
+            await asyncio.sleep(delay)
+            await self.refresh_state()
+            if self._state.power is not None:
+                return
+            _LOGGER.debug(
+                "Startup state query for %s: no state yet after retry %d/3",
+                self.name, attempt,
+            )
 
     async def async_shutdown(self) -> None:
         """Clean up resources."""
         if self._momentary_task and not self._momentary_task.done():
             self._momentary_task.cancel()
+        if self._startup_retry_task and not self._startup_retry_task.done():
+            self._startup_retry_task.cancel()
         if self._ble_disconnect_task and not self._ble_disconnect_task.done():
             self._ble_disconnect_task.cancel()
         if self._ble_client:

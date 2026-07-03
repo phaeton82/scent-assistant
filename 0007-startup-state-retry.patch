@@ -1,0 +1,71 @@
+From 8e31f09842a9f75f49ebfbedcd9cd80f9b1c04c6 Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Fri, 3 Jul 2026 21:10:25 +0000
+Subject: [PATCH] Retry initial state query a few times after HA startup
+
+Right at cold boot, HA's bluetooth integration may not have
+(re)discovered a device yet, so the first connect attempt in
+async_setup() can fail even though the device is reachable moments
+later. Do one immediate attempt inline, then hand off delayed retries
+(2s/5s/10s) to a background task so config entry setup isn't blocked
+for up to ~17 seconds. Applies to all BLE device families, not just
+Yooai.
+---
+ custom_components/scent_assistant/device.py | 28 ++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/custom_components/scent_assistant/device.py b/custom_components/scent_assistant/device.py
+index 1e20cf6..be704cb 100644
+--- a/custom_components/scent_assistant/device.py
++++ b/custom_components/scent_assistant/device.py
+@@ -128,6 +128,7 @@ class ScentDiffuserDevice:
+         # auto-off after this many seconds via a background task.
+         self.momentary_seconds: int = DEFAULT_MOMENTARY_SECONDS
+         self._momentary_task: asyncio.Task | None = None
++        self._startup_retry_task: asyncio.Task | None = None
+ 
+     # ------------------------------------------------------------------
+     # Properties
+@@ -1148,13 +1149,38 @@ class ScentDiffuserDevice:
+     # ------------------------------------------------------------------
+ 
+     async def async_setup(self) -> None:
+-        """Initial setup - query state once."""
++        """Initial setup - query state once, then keep trying briefly.
++
++        Right at HA startup the bluetooth integration may not have
++        (re)discovered this device yet, so the very first connect attempt
++        can fail even though the device is perfectly reachable a few
++        seconds later. Do one immediate attempt inline (so entry setup
++        still gets a state if the device is already visible), then hand
++        off a few delayed retries to a background task rather than
++        blocking config entry setup for up to ~17 seconds.
++        """
+         await self.refresh_state()
++        if not self._ble_address or self._state.power is not None:
++            return
++        self._startup_retry_task = asyncio.ensure_future(self._startup_retry_query())
++
++    async def _startup_retry_query(self) -> None:
++        for attempt, delay in enumerate((2, 5, 10), start=1):
++            await asyncio.sleep(delay)
++            await self.refresh_state()
++            if self._state.power is not None:
++                return
++            _LOGGER.debug(
++                "Startup state query for %s: no state yet after retry %d/3",
++                self.name, attempt,
++            )
+ 
+     async def async_shutdown(self) -> None:
+         """Clean up resources."""
+         if self._momentary_task and not self._momentary_task.done():
+             self._momentary_task.cancel()
++        if self._startup_retry_task and not self._startup_retry_task.done():
++            self._startup_retry_task.cancel()
+         if self._ble_disconnect_task and not self._ble_disconnect_task.done():
+             self._ble_disconnect_task.cancel()
+         if self._ble_client:
+-- 
+2.43.0
+
