@@ -753,28 +753,48 @@ class ScentDiffuserDevice:
         return False
 
     async def momentary_diffuse(self) -> bool:
-        """Run the diffuser for `momentary_seconds`, then switch it off.
+        """Run the diffuser for `momentary_seconds`, then restore whatever
+        power state it was in before the button was pressed.
 
         There is no native one-shot command in the Aroma-Link protocol
         (verified against the decompiled official app), so this is
-        power-on followed by a delayed power-off task. Pressing again
-        while a run is active restarts the countdown.
+        power-on followed by a delayed power-restore task. Pressing again
+        while a run is active restarts the countdown (and re-captures the
+        state to restore to, in case it changed since the first press).
+
+        Yooai devices only start a fresh run/pause spray cycle on an
+        off->on transition — if Power is already on, sending "on" again
+        is a no-op and nothing new sprays. So on that family, if the
+        diffuser is already on we cycle it off first (brief pause), then
+        on, guaranteeing "Diffuse Now" always kicks off a new burst
+        rather than silently doing nothing when pressed mid-cycle. Once
+        `momentary_seconds` has elapsed we restore Power to whatever it
+        was when the button was pressed — on if it was already running
+        (e.g. mid-schedule), off if it was off — rather than always
+        forcing it off.
         """
         if self._momentary_task and not self._momentary_task.done():
             self._momentary_task.cancel()
+
+        restore_to = bool(self._state.power)
+
+        if isinstance(self._protocol, YooaiBleProtocol) and self._state.power:
+            await self.set_power(False)
+            await asyncio.sleep(1.0)
+
         if not await self.set_power(True):
             return False
         self._momentary_task = asyncio.ensure_future(
-            self._momentary_off_later(self.momentary_seconds)
+            self._momentary_off_later(self.momentary_seconds, restore_to=restore_to)
         )
         return True
 
-    async def _momentary_off_later(self, delay: int) -> None:
+    async def _momentary_off_later(self, delay: int, restore_to: bool = False) -> None:
         await asyncio.sleep(delay)
-        if not await self.set_power(False):
+        if not await self.set_power(restore_to):
             _LOGGER.warning(
-                "Momentary diffusion on %s: auto power-off failed — "
-                "the diffuser may still be running", self.name,
+                "Momentary diffusion on %s: auto power-restore (to %s) failed — "
+                "the diffuser may still be running", self.name, restore_to,
             )
 
     async def set_fan(self, on: bool) -> bool:
