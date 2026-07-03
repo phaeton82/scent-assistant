@@ -795,7 +795,7 @@ class ScentDiffuserDevice:
         if not self._ble_address:
             return False
         proto = self._protocol
-        if isinstance(proto, (ScentMarketingAkProtocol, ScentMarketingGwProtocol)):
+        if isinstance(proto, (ScentMarketingAkProtocol, ScentMarketingGwProtocol, YooaiBleProtocol)):
             cmd = proto.build_lock(on)
             if await self._ble_execute(cmd):
                 self._state.lock = on
@@ -811,6 +811,8 @@ class ScentDiffuserDevice:
         if isinstance(proto, ScentMarketingAkProtocol):
             cmd = proto.build_lamp(on)
         elif isinstance(proto, ScentMarketingGwProtocol):
+            cmd = proto.build_light(on)
+        elif isinstance(proto, YooaiBleProtocol):
             cmd = proto.build_light(on)
         else:
             return False

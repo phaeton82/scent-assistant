@@ -1,0 +1,146 @@
+From 63ee3e535becdaebf0ba581caadfe7b33a5aeee4 Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Fri, 3 Jul 2026 20:17:02 +0000
+Subject: [PATCH] Add Lock/Light switches and momentary Diffuse Now button for
+ Yooai devices
+
+- Confirmed opcode map via decompiled DeviceVo toggle handlers:
+  0x10=Fan, 0x11=Lock, 0x12=Power, 0x15=Light (all via operation(subcmd,value))
+- build_power/build_fan docstrings updated: mapping confirmed on real hardware
+- Wired Lock+Light switches and momentary diffuse button into switch.py/button.py/device.py
+---
+ custom_components/scent_assistant/button.py   |  5 +++--
+ custom_components/scent_assistant/const.py    | 13 ++++++-----
+ custom_components/scent_assistant/device.py   |  4 +++-
+ .../scent_assistant/protocol_ble.py           | 22 +++++++++++++++----
+ custom_components/scent_assistant/switch.py   |  7 ++++++
+ 5 files changed, 38 insertions(+), 13 deletions(-)
+
+diff --git a/custom_components/scent_assistant/button.py b/custom_components/scent_assistant/button.py
+index c6fa3a5..52d6772 100644
+--- a/custom_components/scent_assistant/button.py
++++ b/custom_components/scent_assistant/button.py
+@@ -26,8 +26,9 @@ async def async_setup_entry(
+ 
+     entities: list[ButtonEntity] = [TimeSyncButton(device, entry)]
+     # Momentary diffusion is power-on + delayed power-off, which only
+-    # makes sense on families where power is a plain on/off (Aroma-Link).
+-    if device.device_type == DeviceType.AROMA_LINK:
++    # makes sense on families where power is a plain on/off (Aroma-Link,
++    # Yooai — confirmed on real hardware that Power = immediate mist).
++    if device.device_type in (DeviceType.AROMA_LINK, DeviceType.YOOAI_BLE):
+         entities.append(MomentaryDiffuseButton(device, entry))
+     async_add_entities(entities)
+ 
+diff --git a/custom_components/scent_assistant/const.py b/custom_components/scent_assistant/const.py
+index ccbf6ff..ed50b66 100644
+--- a/custom_components/scent_assistant/const.py
++++ b/custom_components/scent_assistant/const.py
+@@ -96,12 +96,13 @@ YOOAI_TYPE_OPERATION = 0x07
+ # Sent standalone (no data) every few seconds to keep the connection alive.
+ YOOAI_TYPE_HEARTBEAT = 0xA1
+ 
+-# Sub-commands used with YOOAI_TYPE_OPERATION, confirmed present in an HCI
+-# capture toggling the device's two switches. Which physical switch (power
+-# vs. fan) each one maps to was not yet confirmed against the real hardware
+-# at the time of writing — verify with a live device and swap if reversed.
+-YOOAI_OP_A = 0x12
+-YOOAI_OP_B = 0x10
++# Sub-commands used with YOOAI_TYPE_OPERATION. Confirmed against both a
++# real device (manual field-test) and the decompiled app's DeviceVo
++# toggle handlers (isSwitch/isFan/isLock/isLight).
++YOOAI_OP_A = 0x12  # Power / "Running status" (confirmed: DeviceVo.isSwitch())
++YOOAI_OP_B = 0x10  # Fan (confirmed: DeviceVo.isFan())
++YOOAI_OP_LOCK = 0x11   # Device/child lock (confirmed: DeviceVo.isLock())
++YOOAI_OP_LIGHT = 0x15  # Auxiliary light, if present (confirmed: DeviceVo.isLight())
+ 
+ # AK command opcodes (mirrors com.IAA360.ChengHao.Device.Data.BtDataModel).
+ # Negative bytes in the Java source are decoded to their 0..255 equivalents.
+diff --git a/custom_components/scent_assistant/device.py b/custom_components/scent_assistant/device.py
+index 61b2c74..b453938 100644
+--- a/custom_components/scent_assistant/device.py
++++ b/custom_components/scent_assistant/device.py
+@@ -795,7 +795,7 @@ class ScentDiffuserDevice:
+         if not self._ble_address:
+             return False
+         proto = self._protocol
+-        if isinstance(proto, (ScentMarketingAkProtocol, ScentMarketingGwProtocol)):
++        if isinstance(proto, (ScentMarketingAkProtocol, ScentMarketingGwProtocol, YooaiBleProtocol)):
+             cmd = proto.build_lock(on)
+             if await self._ble_execute(cmd):
+                 self._state.lock = on
+@@ -812,6 +812,8 @@ class ScentDiffuserDevice:
+             cmd = proto.build_lamp(on)
+         elif isinstance(proto, ScentMarketingGwProtocol):
+             cmd = proto.build_light(on)
++        elif isinstance(proto, YooaiBleProtocol):
++            cmd = proto.build_light(on)
+         else:
+             return False
+         if await self._ble_execute(cmd):
+diff --git a/custom_components/scent_assistant/protocol_ble.py b/custom_components/scent_assistant/protocol_ble.py
+index 2802929..5bb5a90 100644
+--- a/custom_components/scent_assistant/protocol_ble.py
++++ b/custom_components/scent_assistant/protocol_ble.py
+@@ -68,7 +68,7 @@ from .const import (
+     YOOAI_SERVICE_UUID, YOOAI_CHAR_UUID,
+     YOOAI_HEADER, YOOAI_TRAILER,
+     YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT,
+-    YOOAI_OP_A, YOOAI_OP_B,
++    YOOAI_OP_A, YOOAI_OP_B, YOOAI_OP_LOCK, YOOAI_OP_LIGHT,
+ )
+ 
+ import json
+@@ -2061,14 +2061,28 @@ class YooaiBleProtocol(BleProtocol):
+         return cls._build_frame(YOOAI_TYPE_OPERATION, bytes([subcmd, value, 0x00]))
+ 
+     def build_power(self, on: bool) -> bytes:
+-        # TODO: confirm against real hardware whether YOOAI_OP_A or
+-        # YOOAI_OP_B is Power vs. Fan — both were seen toggled 0/1 in the
+-        # captured traffic but which switch is which wasn't isolated yet.
++        # Confirmed against a real device: this is "Running status" in
++        # the official app (DeviceVo.isSwitch()) — the actual mist on/off.
+         return self._build_operation(YOOAI_OP_A, 1 if on else 0)
+ 
+     def build_fan(self, on: bool) -> bytes:
++        # Confirmed: DeviceVo.isFan(). Only audible/effective while
++        # Power is also on.
+         return self._build_operation(YOOAI_OP_B, 1 if on else 0)
+ 
++    def build_lock(self, on: bool) -> bytes:
++        """Child-lock toggle (DeviceVo.isLock() in the decompiled app)."""
++        return self._build_operation(YOOAI_OP_LOCK, 1 if on else 0)
++
++    def build_light(self, on: bool) -> bytes:
++        """Auxiliary light toggle (DeviceVo.isLight()).
++
++        Present in the shared app code but not confirmed on the NAMSTE
++        SKU specifically — some Yooai-family devices don't have a
++        physical light, in which case this is presumably a silent no-op.
++        """
++        return self._build_operation(YOOAI_OP_LIGHT, 1 if on else 0)
++
+     def build_query(self) -> bytes:
+         # No dedicated "query all" was identified yet; the heartbeat frame
+         # is harmless to send and keeps the connection/state flowing.
+diff --git a/custom_components/scent_assistant/switch.py b/custom_components/scent_assistant/switch.py
+index 987881e..f422633 100644
+--- a/custom_components/scent_assistant/switch.py
++++ b/custom_components/scent_assistant/switch.py
+@@ -51,6 +51,13 @@ async def async_setup_entry(
+             # which only resolves after the first BLE login.
+             entities.append(DiffuserScheduleSwitch(device, entry))
+ 
++    # Yooai ("Scent Tech" app) — child lock and auxiliary light are
++    # confirmed opcodes in the decompiled app (DeviceVo.isLock/isLight).
++    # Light isn't confirmed present on every SKU; harmless to expose.
++    if device.device_type == DeviceType.YOOAI_BLE and not is_cloud:
++        entities.append(DiffuserLockSwitch(device, entry))
++        entities.append(DiffuserLampSwitch(device, entry))
++
+     async_add_entities(entities)
+ 
+ 
+-- 
+2.43.0
+

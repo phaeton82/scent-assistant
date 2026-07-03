@@ -68,7 +68,7 @@ from .const import (
     YOOAI_SERVICE_UUID, YOOAI_CHAR_UUID,
     YOOAI_HEADER, YOOAI_TRAILER,
     YOOAI_TYPE_OPERATION, YOOAI_TYPE_HEARTBEAT,
-    YOOAI_OP_A, YOOAI_OP_B,
+    YOOAI_OP_A, YOOAI_OP_B, YOOAI_OP_LOCK, YOOAI_OP_LIGHT,
 )
 
 import json
@@ -2061,13 +2061,27 @@ class YooaiBleProtocol(BleProtocol):
         return cls._build_frame(YOOAI_TYPE_OPERATION, bytes([subcmd, value, 0x00]))
 
     def build_power(self, on: bool) -> bytes:
-        # TODO: confirm against real hardware whether YOOAI_OP_A or
-        # YOOAI_OP_B is Power vs. Fan — both were seen toggled 0/1 in the
-        # captured traffic but which switch is which wasn't isolated yet.
+        # Confirmed against a real device: this is "Running status" in
+        # the official app (DeviceVo.isSwitch()) — the actual mist on/off.
         return self._build_operation(YOOAI_OP_A, 1 if on else 0)
 
     def build_fan(self, on: bool) -> bytes:
+        # Confirmed: DeviceVo.isFan(). Only audible/effective while
+        # Power is also on.
         return self._build_operation(YOOAI_OP_B, 1 if on else 0)
+
+    def build_lock(self, on: bool) -> bytes:
+        """Child-lock toggle (DeviceVo.isLock() in the decompiled app)."""
+        return self._build_operation(YOOAI_OP_LOCK, 1 if on else 0)
+
+    def build_light(self, on: bool) -> bytes:
+        """Auxiliary light toggle (DeviceVo.isLight()).
+
+        Present in the shared app code but not confirmed on the NAMSTE
+        SKU specifically — some Yooai-family devices don't have a
+        physical light, in which case this is presumably a silent no-op.
+        """
+        return self._build_operation(YOOAI_OP_LIGHT, 1 if on else 0)
 
     def build_query(self) -> bytes:
         # No dedicated "query all" was identified yet; the heartbeat frame

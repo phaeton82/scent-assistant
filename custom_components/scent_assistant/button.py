@@ -26,8 +26,9 @@ async def async_setup_entry(
 
     entities: list[ButtonEntity] = [TimeSyncButton(device, entry)]
     # Momentary diffusion is power-on + delayed power-off, which only
-    # makes sense on families where power is a plain on/off (Aroma-Link).
-    if device.device_type == DeviceType.AROMA_LINK:
+    # makes sense on families where power is a plain on/off (Aroma-Link,
+    # Yooai — confirmed on real hardware that Power = immediate mist).
+    if device.device_type in (DeviceType.AROMA_LINK, DeviceType.YOOAI_BLE):
         entities.append(MomentaryDiffuseButton(device, entry))
     async_add_entities(entities)
 

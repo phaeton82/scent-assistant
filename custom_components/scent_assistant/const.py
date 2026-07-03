@@ -96,12 +96,13 @@ YOOAI_TYPE_OPERATION = 0x07
 # Sent standalone (no data) every few seconds to keep the connection alive.
 YOOAI_TYPE_HEARTBEAT = 0xA1
 
-# Sub-commands used with YOOAI_TYPE_OPERATION, confirmed present in an HCI
-# capture toggling the device's two switches. Which physical switch (power
-# vs. fan) each one maps to was not yet confirmed against the real hardware
-# at the time of writing — verify with a live device and swap if reversed.
-YOOAI_OP_A = 0x12
-YOOAI_OP_B = 0x10
+# Sub-commands used with YOOAI_TYPE_OPERATION. Confirmed against both a
+# real device (manual field-test) and the decompiled app's DeviceVo
+# toggle handlers (isSwitch/isFan/isLock/isLight).
+YOOAI_OP_A = 0x12  # Power / "Running status" (confirmed: DeviceVo.isSwitch())
+YOOAI_OP_B = 0x10  # Fan (confirmed: DeviceVo.isFan())
+YOOAI_OP_LOCK = 0x11   # Device/child lock (confirmed: DeviceVo.isLock())
+YOOAI_OP_LIGHT = 0x15  # Auxiliary light, if present (confirmed: DeviceVo.isLight())
 
 # AK command opcodes (mirrors com.IAA360.ChengHao.Device.Data.BtDataModel).
 # Negative bytes in the Java source are decoded to their 0..255 equivalents.
