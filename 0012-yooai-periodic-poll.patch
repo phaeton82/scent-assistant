@@ -1,0 +1,77 @@
+From 36d92f4ea42a1d0bde1efc3df6799c535b4f0214 Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Sat, 4 Jul 2026 18:53:51 +0000
+Subject: [PATCH] Add periodic schedule/state polling for Yooai devices (every
+ 5 min)
+
+Yooai devices don't push spontaneous state changes, and the official
+app is the main way to edit the schedule. Without this, an app-side
+edit stayed invisible in HA until some other BLE connect happened to
+occur. Mirrors the existing cloud-poll pattern but on a longer
+interval (300s vs 60s) since each poll is a real BLE connect, not a
+free API call.
+---
+ custom_components/scent_assistant/__init__.py | 21 +++++++++++++++++++
+ custom_components/scent_assistant/const.py    |  7 +++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/custom_components/scent_assistant/__init__.py b/custom_components/scent_assistant/__init__.py
+index 39de4c6..cffa401 100644
+--- a/custom_components/scent_assistant/__init__.py
++++ b/custom_components/scent_assistant/__init__.py
+@@ -22,6 +22,7 @@ from .const import (
+     CONF_CLOUD_DEVICE_ID,
+     CONF_CONNECTION_MODE,
+     CLOUD_POLL_INTERVAL_SECONDS,
++    YOOAI_SCHEDULE_POLL_INTERVAL_SECONDS,
+     WEEKDAY_MON, WEEKDAY_TUE, WEEKDAY_WED, WEEKDAY_THU,
+     WEEKDAY_FRI, WEEKDAY_SAT, WEEKDAY_SUN,
+     DeviceType,
+@@ -124,6 +125,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+             timedelta(seconds=CLOUD_POLL_INTERVAL_SECONDS),
+         )
+ 
++    # Yooai devices don't push spontaneous state on their own, and the
++    # official app is the primary way to edit its schedule — without a
++    # periodic refresh, a schedule change made there stays invisible in
++    # HA until something else happens to trigger a BLE connect (a user
++    # touching a switch, or a full HA restart). Poll less often than the
++    # cloud interval since each poll is a real (if brief) BLE connect,
++    # not a free API call.
++    if connection_mode == "ble" and device_type == DeviceType.YOOAI_BLE:
++        async def _periodic_yooai_poll(now=None) -> None:
++            try:
++                await device.refresh_state()
++            except Exception as err:
++                _LOGGER.debug("Yooai schedule poll failed (will retry): %s", err)
++
++        device._unsub_cloud_poll = async_track_time_interval(
++            hass,
++            _periodic_yooai_poll,
++            timedelta(seconds=YOOAI_SCHEDULE_POLL_INTERVAL_SECONDS),
++        )
++
+     # Register services (once for all entries)
+     if not hass.services.has_service(DOMAIN, SERVICE_SET_SCHEDULE):
+         async def handle_set_schedule(call: ServiceCall) -> None:
+diff --git a/custom_components/scent_assistant/const.py b/custom_components/scent_assistant/const.py
+index d228dcf..50eab85 100644
+--- a/custom_components/scent_assistant/const.py
++++ b/custom_components/scent_assistant/const.py
+@@ -435,6 +435,13 @@ CLOUD_ENDPOINT_SCHEDULE = "/v1/app/data/workSetApp"
+ # (onOff, workStatus, work/pauseRemainTime, pumpCount) via /v1/app/device/work/{id}.
+ CLOUD_POLL_INTERVAL_SECONDS = 60
+ 
++# Polling interval for Yooai devices specifically: unlike cloud devices,
++# there's a real (if small) cost to a periodic BLE connect, so this is
++# longer than the cloud interval. Added because schedule edits made in
++# the official Scent Tech app are otherwise invisible to HA until the
++# next connect for any other reason, or a full restart.
++YOOAI_SCHEDULE_POLL_INTERVAL_SECONDS = 300
++
+ # ---------------------------------------------------------------------------
+ # Weekday bitmask (shared by both protocols)
+ # ---------------------------------------------------------------------------
+-- 
+2.43.0
+

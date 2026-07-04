@@ -435,6 +435,13 @@ CLOUD_ENDPOINT_SCHEDULE = "/v1/app/data/workSetApp"
 # (onOff, workStatus, work/pauseRemainTime, pumpCount) via /v1/app/device/work/{id}.
 CLOUD_POLL_INTERVAL_SECONDS = 60
 
+# Polling interval for Yooai devices specifically: unlike cloud devices,
+# there's a real (if small) cost to a periodic BLE connect, so this is
+# longer than the cloud interval. Added because schedule edits made in
+# the official Scent Tech app are otherwise invisible to HA until the
+# next connect for any other reason, or a full restart.
+YOOAI_SCHEDULE_POLL_INTERVAL_SECONDS = 300
+
 # ---------------------------------------------------------------------------
 # Weekday bitmask (shared by both protocols)
 # ---------------------------------------------------------------------------

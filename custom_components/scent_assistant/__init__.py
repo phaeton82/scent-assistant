@@ -22,6 +22,7 @@ from .const import (
     CONF_CLOUD_DEVICE_ID,
     CONF_CONNECTION_MODE,
     CLOUD_POLL_INTERVAL_SECONDS,
+    YOOAI_SCHEDULE_POLL_INTERVAL_SECONDS,
     WEEKDAY_MON, WEEKDAY_TUE, WEEKDAY_WED, WEEKDAY_THU,
     WEEKDAY_FRI, WEEKDAY_SAT, WEEKDAY_SUN,
     DeviceType,
@@ -122,6 +123,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             _periodic_cloud_poll,
             timedelta(seconds=CLOUD_POLL_INTERVAL_SECONDS),
+        )
+
+    # Yooai devices don't push spontaneous state on their own, and the
+    # official app is the primary way to edit its schedule — without a
+    # periodic refresh, a schedule change made there stays invisible in
+    # HA until something else happens to trigger a BLE connect (a user
+    # touching a switch, or a full HA restart). Poll less often than the
+    # cloud interval since each poll is a real (if brief) BLE connect,
+    # not a free API call.
+    if connection_mode == "ble" and device_type == DeviceType.YOOAI_BLE:
+        async def _periodic_yooai_poll(now=None) -> None:
+            try:
+                await device.refresh_state()
+            except Exception as err:
+                _LOGGER.debug("Yooai schedule poll failed (will retry): %s", err)
+
+        device._unsub_cloud_poll = async_track_time_interval(
+            hass,
+            _periodic_yooai_poll,
+            timedelta(seconds=YOOAI_SCHEDULE_POLL_INTERVAL_SECONDS),
         )
 
     # Register services (once for all entries)
