@@ -2130,21 +2130,29 @@ class YooaiBleProtocol(BleProtocol):
         if type_byte == 0x02 and len(payload) >= 1:
             # Generic short ACK — connectivity confirmation only.
             result["_ack"] = payload.hex()
-        elif type_byte == 0x21 and len(payload) >= 5:
-            # Status push, sent after every operation() write and
-            # periodically. Byte 4 of the payload is a bitmask confirmed
-            # against a clean, step-by-step capture (power/fan/lock
-            # toggled one at a time with a known device.py protocol
-            # under test): bit0=Power, bit1=Fan, bit2=Lock. Bit3 was seen
-            # set only in the single push right after a power-on and
-            # cleared in every later push — looks like a transient
-            # startup/priming flag rather than steady-state info, so it
-            # isn't mapped to a field yet.
+        elif type_byte == 0x21 and len(payload) >= 13:
+            # Status push, sent after every operation() write, on request
+            # (0x08 query), and apparently spontaneously during phase
+            # transitions. Byte 4 is a bitmask confirmed against a clean,
+            # step-by-step capture: bit0=Power, bit1=Fan, bit2=Lock.
+            # Byte 12 was confirmed live: it flipped 0->1 in the exact
+            # push that arrived the moment the diffuser was visually
+            # observed spraying, and back to 0 in the very next push
+            # moments later — treated as "currently spraying" within the
+            # run/pause cycle. Only one transition observed so far, so
+            # treat this as provisional until seen across a few more
+            # cycles.
             status = payload[4]
             result["power"] = bool(status & 0x01)
             result["fan"] = bool(status & 0x02)
             result["lock"] = bool(status & 0x04)
-            result["phase"] = "idle" if result["power"] else "off"
+            spraying = bool(payload[12])
+            if not result["power"]:
+                result["phase"] = "off"
+            elif spraying:
+                result["phase"] = "spraying"
+            else:
+                result["phase"] = "idle"
         return result
 
 

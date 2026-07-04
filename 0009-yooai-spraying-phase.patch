@@ -1,0 +1,67 @@
+From a8dc309a294d334c4413359a9a9f0bf76b10935d Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Sat, 4 Jul 2026 17:36:26 +0000
+Subject: [PATCH] Detect active spraying phase (payload byte 12) for the status
+ sensor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Confirmed live: byte 12 of the 0x21 status push flipped 0->1 in the
+exact push that arrived the moment the diffuser was visually observed
+spraying, and back to 0 moments later. Status sensor now reports
+'spraying' instead of a flat 'idle' while Power is on. Only one
+transition observed so far — provisional, worth re-checking over a
+few more cycles.
+---
+ .../scent_assistant/protocol_ble.py           | 30 ++++++++++++-------
+ 1 file changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/custom_components/scent_assistant/protocol_ble.py b/custom_components/scent_assistant/protocol_ble.py
+index ad5c260..9d641a5 100644
+--- a/custom_components/scent_assistant/protocol_ble.py
++++ b/custom_components/scent_assistant/protocol_ble.py
+@@ -2130,21 +2130,29 @@ class YooaiBleProtocol(BleProtocol):
+         if type_byte == 0x02 and len(payload) >= 1:
+             # Generic short ACK — connectivity confirmation only.
+             result["_ack"] = payload.hex()
+-        elif type_byte == 0x21 and len(payload) >= 5:
+-            # Status push, sent after every operation() write and
+-            # periodically. Byte 4 of the payload is a bitmask confirmed
+-            # against a clean, step-by-step capture (power/fan/lock
+-            # toggled one at a time with a known device.py protocol
+-            # under test): bit0=Power, bit1=Fan, bit2=Lock. Bit3 was seen
+-            # set only in the single push right after a power-on and
+-            # cleared in every later push — looks like a transient
+-            # startup/priming flag rather than steady-state info, so it
+-            # isn't mapped to a field yet.
++        elif type_byte == 0x21 and len(payload) >= 13:
++            # Status push, sent after every operation() write, on request
++            # (0x08 query), and apparently spontaneously during phase
++            # transitions. Byte 4 is a bitmask confirmed against a clean,
++            # step-by-step capture: bit0=Power, bit1=Fan, bit2=Lock.
++            # Byte 12 was confirmed live: it flipped 0->1 in the exact
++            # push that arrived the moment the diffuser was visually
++            # observed spraying, and back to 0 in the very next push
++            # moments later — treated as "currently spraying" within the
++            # run/pause cycle. Only one transition observed so far, so
++            # treat this as provisional until seen across a few more
++            # cycles.
+             status = payload[4]
+             result["power"] = bool(status & 0x01)
+             result["fan"] = bool(status & 0x02)
+             result["lock"] = bool(status & 0x04)
+-            result["phase"] = "idle" if result["power"] else "off"
++            spraying = bool(payload[12])
++            if not result["power"]:
++                result["phase"] = "off"
++            elif spraying:
++                result["phase"] = "spraying"
++            else:
++                result["phase"] = "idle"
+         return result
+ 
+ 
+-- 
+2.43.0
+
