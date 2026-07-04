@@ -2132,7 +2132,7 @@ class YooaiBleProtocol(BleProtocol):
         self,
         slot: ScheduleSlot,
         weekday_mask: int,
-        timer_slot: int = 0,
+        timer_slot: int = 1,
         timer_id: int = 0,
     ) -> bytes:
         """Write one schedule slot.
@@ -2152,9 +2152,15 @@ class YooaiBleProtocol(BleProtocol):
         when any day is selected (its "custom day pattern active" flag) —
         replicated here rather than left to the caller.
 
-        `timer_id` is a cloud-assigned ID in the official app that this
-        offline integration has no equivalent for; 0 is untested but is
-        the only value that makes sense without a cloud account.
+        `timer_slot` defaults to 1 — confirmed via a real schedule
+        read-back that the app's "Mode I" is slot **1**, not 0 (slots
+        are numbered 1-5 for Mode I-V).
+
+        `timer_id` is a per-slot ID the device itself assigns — also
+        confirmed via read-back (each slot's id is the previous slot's
+        plus one; not something to invent). Pass the cached value from
+        a prior read-back (`DiffuserDevice`'s `_yooai_timer_ids`); 0 is
+        untested and may be rejected by the device.
         """
         start_minutes = slot.start_hour * 60 + slot.start_minute
         stop_minutes = slot.end_hour * 60 + slot.end_minute
@@ -2206,6 +2212,47 @@ class YooaiBleProtocol(BleProtocol):
                 result["phase"] = "spraying"
             else:
                 result["phase"] = "idle"
+        elif type_byte == 0x88 and len(payload) >= 2:
+            # Full schedule read-back, sent automatically after the 0x08
+            # query. Format: [slot_count LE16] then that many 16-byte
+            # slot records: [enabled(1)][slot_num(1)][weekday LE16]
+            # [start_min LE16][stop_min LE16][run_sec LE16][pause_sec
+            # LE16][timer_id LE32]. Confirmed against a real capture
+            # with known injected values (run=75, pause=120 round-tripped
+            # exactly). The device assigns its own timer_id per slot —
+            # required when writing that slot back, so we cache every
+            # slot's id here for build_schedule() to reuse.
+            count = int.from_bytes(payload[0:2], "little")
+            slots = {}
+            offset = 2
+            for _ in range(count):
+                if offset + 16 > len(payload):
+                    break
+                chunk = payload[offset:offset + 16]
+                offset += 16
+                slot_num = chunk[1]
+                slots[slot_num] = {
+                    "enabled": bool(chunk[0]),
+                    "weekday_mask": int.from_bytes(chunk[2:4], "little") & 0x7F,
+                    "start_minutes": int.from_bytes(chunk[4:6], "little"),
+                    "stop_minutes": int.from_bytes(chunk[6:8], "little"),
+                    "run_seconds": int.from_bytes(chunk[8:10], "little"),
+                    "pause_seconds": int.from_bytes(chunk[10:12], "little"),
+                    "timer_id": int.from_bytes(chunk[12:16], "little"),
+                }
+            result["_yooai_schedule_slots"] = slots
+            # Surface slot 1 ("Mode I") as the primary/only schedule this
+            # integration manages for now.
+            primary = slots.get(1)
+            if primary:
+                result["schedule_enabled"] = primary["enabled"]
+                result["weekday_mask"] = primary["weekday_mask"]
+                result["start_hour"] = primary["start_minutes"] // 60
+                result["start_minute"] = primary["start_minutes"] % 60
+                result["end_hour"] = primary["stop_minutes"] // 60
+                result["end_minute"] = primary["stop_minutes"] % 60
+                result["work_seconds"] = primary["run_seconds"]
+                result["pause_seconds"] = primary["pause_seconds"]
         return result
 
 

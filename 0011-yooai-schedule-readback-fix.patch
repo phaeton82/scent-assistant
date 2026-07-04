@@ -1,0 +1,153 @@
+From 9007240d6875ced2ce076da90b67fd4cd9aae3c0 Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Sat, 4 Jul 2026 18:45:04 +0000
+Subject: [PATCH] Decode Yooai schedule read-back (0x88) and fix slot number
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Confirmed against a real capture with known injected test values
+(run=75, pause=120 round-tripped exactly):
+
+- Full read-back format: [slot_count LE16] + N * 16-byte slot records,
+  same layout as the write path.
+- Mode I is slot **1**, not 0 — the earlier write implementation had
+  this wrong (would have targeted a nonexistent/wrong slot).
+- Each slot has a device-assigned timer_id that must be echoed back on
+  write; ids are sequential per slot (slot1=X, slot2=X+1, ...). Now
+  cached from every read-back and reused when writing, instead of
+  always sending 0.
+
+Start/End Time, Work/Pause Duration, the 7 weekday switches, and the
+Schedule switch now all populate from real device state after every
+connect, instead of showing generic defaults.
+---
+ custom_components/scent_assistant/device.py   | 17 +++++-
+ .../scent_assistant/protocol_ble.py           | 55 +++++++++++++++++--
+ 2 files changed, 67 insertions(+), 5 deletions(-)
+
+diff --git a/custom_components/scent_assistant/device.py b/custom_components/scent_assistant/device.py
+index 4fc8e16..e09c18b 100644
+--- a/custom_components/scent_assistant/device.py
++++ b/custom_components/scent_assistant/device.py
+@@ -129,6 +129,10 @@ class ScentDiffuserDevice:
+         self.momentary_seconds: int = DEFAULT_MOMENTARY_SECONDS
+         self._momentary_task: asyncio.Task | None = None
+         self._startup_retry_task: asyncio.Task | None = None
++        # Yooai only: {slot_num: device-assigned timer_id}, populated from
++        # the 0x88 schedule read-back. Needed because writing a slot
++        # requires echoing back its own id — see YooaiBleProtocol.build_schedule.
++        self._yooai_timer_ids: dict[int, int] = {}
+ 
+     # ------------------------------------------------------------------
+     # Properties
+@@ -668,6 +672,9 @@ class ScentDiffuserDevice:
+         if "schedule_enabled" in updates:
+             self._state.schedule_enabled = updates["schedule_enabled"]
+             changed = True
++        if "_yooai_schedule_slots" in updates:
++            for slot_num, slot_data in updates["_yooai_schedule_slots"].items():
++                self._yooai_timer_ids[slot_num] = slot_data["timer_id"]
+ 
+         # Derive oil days-remaining from the latest oil + schedule state.
+         # The 0x50 frame's raw value doesn't match the official app, which
+@@ -1102,7 +1109,15 @@ class ScentDiffuserDevice:
+                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
+                     enabled=enabled, work_seconds=work, pause_seconds=pause,
+                 )
+-                cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
++                # Mode I is slot 1 (confirmed via read-back — slots are
++                # numbered 1-5, not 0-4). Each slot has a device-assigned
++                # timer_id that must be echoed back; use the cached value
++                # from the last read-back if we have one, else 0
++                # (untested — the device may reject an unknown id).
++                cmd = self._protocol.build_schedule(
++                    slot, weekday_mask=weekday_mask,
++                    timer_slot=1, timer_id=self._yooai_timer_ids.get(1, 0),
++                )
+ 
+             if cmd and await self._ble_execute(cmd):
+                 self._notify_state_changed()
+diff --git a/custom_components/scent_assistant/protocol_ble.py b/custom_components/scent_assistant/protocol_ble.py
+index 39dcd14..910ac27 100644
+--- a/custom_components/scent_assistant/protocol_ble.py
++++ b/custom_components/scent_assistant/protocol_ble.py
+@@ -2132,7 +2132,7 @@ class YooaiBleProtocol(BleProtocol):
+         self,
+         slot: ScheduleSlot,
+         weekday_mask: int,
+-        timer_slot: int = 0,
++        timer_slot: int = 1,
+         timer_id: int = 0,
+     ) -> bytes:
+         """Write one schedule slot.
+@@ -2152,9 +2152,15 @@ class YooaiBleProtocol(BleProtocol):
+         when any day is selected (its "custom day pattern active" flag) —
+         replicated here rather than left to the caller.
+ 
+-        `timer_id` is a cloud-assigned ID in the official app that this
+-        offline integration has no equivalent for; 0 is untested but is
+-        the only value that makes sense without a cloud account.
++        `timer_slot` defaults to 1 — confirmed via a real schedule
++        read-back that the app's "Mode I" is slot **1**, not 0 (slots
++        are numbered 1-5 for Mode I-V).
++
++        `timer_id` is a per-slot ID the device itself assigns — also
++        confirmed via read-back (each slot's id is the previous slot's
++        plus one; not something to invent). Pass the cached value from
++        a prior read-back (`DiffuserDevice`'s `_yooai_timer_ids`); 0 is
++        untested and may be rejected by the device.
+         """
+         start_minutes = slot.start_hour * 60 + slot.start_minute
+         stop_minutes = slot.end_hour * 60 + slot.end_minute
+@@ -2206,6 +2212,47 @@ class YooaiBleProtocol(BleProtocol):
+                 result["phase"] = "spraying"
+             else:
+                 result["phase"] = "idle"
++        elif type_byte == 0x88 and len(payload) >= 2:
++            # Full schedule read-back, sent automatically after the 0x08
++            # query. Format: [slot_count LE16] then that many 16-byte
++            # slot records: [enabled(1)][slot_num(1)][weekday LE16]
++            # [start_min LE16][stop_min LE16][run_sec LE16][pause_sec
++            # LE16][timer_id LE32]. Confirmed against a real capture
++            # with known injected values (run=75, pause=120 round-tripped
++            # exactly). The device assigns its own timer_id per slot —
++            # required when writing that slot back, so we cache every
++            # slot's id here for build_schedule() to reuse.
++            count = int.from_bytes(payload[0:2], "little")
++            slots = {}
++            offset = 2
++            for _ in range(count):
++                if offset + 16 > len(payload):
++                    break
++                chunk = payload[offset:offset + 16]
++                offset += 16
++                slot_num = chunk[1]
++                slots[slot_num] = {
++                    "enabled": bool(chunk[0]),
++                    "weekday_mask": int.from_bytes(chunk[2:4], "little") & 0x7F,
++                    "start_minutes": int.from_bytes(chunk[4:6], "little"),
++                    "stop_minutes": int.from_bytes(chunk[6:8], "little"),
++                    "run_seconds": int.from_bytes(chunk[8:10], "little"),
++                    "pause_seconds": int.from_bytes(chunk[10:12], "little"),
++                    "timer_id": int.from_bytes(chunk[12:16], "little"),
++                }
++            result["_yooai_schedule_slots"] = slots
++            # Surface slot 1 ("Mode I") as the primary/only schedule this
++            # integration manages for now.
++            primary = slots.get(1)
++            if primary:
++                result["schedule_enabled"] = primary["enabled"]
++                result["weekday_mask"] = primary["weekday_mask"]
++                result["start_hour"] = primary["start_minutes"] // 60
++                result["start_minute"] = primary["start_minutes"] % 60
++                result["end_hour"] = primary["stop_minutes"] // 60
++                result["end_minute"] = primary["stop_minutes"] % 60
++                result["work_seconds"] = primary["run_seconds"]
++                result["pause_seconds"] = primary["pause_seconds"]
+         return result
+ 
+ 
+-- 
+2.43.0
+

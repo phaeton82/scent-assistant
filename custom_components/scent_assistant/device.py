@@ -129,6 +129,10 @@ class ScentDiffuserDevice:
         self.momentary_seconds: int = DEFAULT_MOMENTARY_SECONDS
         self._momentary_task: asyncio.Task | None = None
         self._startup_retry_task: asyncio.Task | None = None
+        # Yooai only: {slot_num: device-assigned timer_id}, populated from
+        # the 0x88 schedule read-back. Needed because writing a slot
+        # requires echoing back its own id — see YooaiBleProtocol.build_schedule.
+        self._yooai_timer_ids: dict[int, int] = {}
 
     # ------------------------------------------------------------------
     # Properties
@@ -668,6 +672,9 @@ class ScentDiffuserDevice:
         if "schedule_enabled" in updates:
             self._state.schedule_enabled = updates["schedule_enabled"]
             changed = True
+        if "_yooai_schedule_slots" in updates:
+            for slot_num, slot_data in updates["_yooai_schedule_slots"].items():
+                self._yooai_timer_ids[slot_num] = slot_data["timer_id"]
 
         # Derive oil days-remaining from the latest oil + schedule state.
         # The 0x50 frame's raw value doesn't match the official app, which
@@ -1102,7 +1109,15 @@ class ScentDiffuserDevice:
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
                     enabled=enabled, work_seconds=work, pause_seconds=pause,
                 )
-                cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
+                # Mode I is slot 1 (confirmed via read-back — slots are
+                # numbered 1-5, not 0-4). Each slot has a device-assigned
+                # timer_id that must be echoed back; use the cached value
+                # from the last read-back if we have one, else 0
+                # (untested — the device may reject an unknown id).
+                cmd = self._protocol.build_schedule(
+                    slot, weekday_mask=weekday_mask,
+                    timer_slot=1, timer_id=self._yooai_timer_ids.get(1, 0),
+                )
 
             if cmd and await self._ble_execute(cmd):
                 self._notify_state_changed()
