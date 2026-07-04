@@ -1120,6 +1120,21 @@ class ScentDiffuserDevice:
                 )
 
             if cmd and await self._ble_execute(cmd):
+                if isinstance(self._protocol, YooaiBleProtocol):
+                    # Confirm the write actually landed by reading the
+                    # schedule back, instead of trusting our own optimistic
+                    # local values — the device needs a moment to process
+                    # a write before its read-back reflects it, so a
+                    # confirmed value only exists after this round-trip.
+                    await asyncio.sleep(1.0)
+                    try:
+                        await self._ble_send(self._protocol.build_query())
+                        await asyncio.sleep(0.5)
+                    except (BleakError, asyncio.TimeoutError, OSError) as err:
+                        _LOGGER.debug(
+                            "Yooai post-write confirmation read failed on %s: %s",
+                            self._ble_name, err,
+                        )
                 self._notify_state_changed()
                 return True
 
