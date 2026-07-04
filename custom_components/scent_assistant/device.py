@@ -871,7 +871,17 @@ class ScentDiffuserDevice:
         On V2 this method delegates to `set_power`, because V2's
         firmware treats the schedule-enabled bit and the power
         concept as the same toggle.
+
+        On Yooai devices, `enabled` is the schedule slot's own "enabled"
+        bit in its TimerVo (independent of Power) — re-push the schedule
+        the same way.
         """
+        if isinstance(self._protocol, YooaiBleProtocol):
+            self._state.schedule_enabled = enabled
+            self._notify_state_changed()
+            if self._ble_address:
+                return await self._write_schedule_to_device(enabled=enabled)
+            return True
         if not isinstance(self._protocol, ScentMarketingAkProtocol):
             return False
         if not self._protocol.is_v3:
@@ -880,6 +890,25 @@ class ScentDiffuserDevice:
         self._notify_state_changed()
         if self._ble_address:
             return await self._write_schedule_to_device(enabled=enabled)
+        return True
+
+    async def set_weekday(self, day_index: int, enabled: bool) -> bool:
+        """Toggle a single weekday (0=Monday..6=Sunday) in the active
+        schedule slot's weekday mask and push the schedule to the device.
+
+        Currently only wired up for Yooai devices; other protocols with
+        per-day scheduling are set as a full mask via the
+        `scent_assistant.set_schedule` service instead.
+        """
+        if not (0 <= day_index <= 6):
+            raise ValueError("day_index must be 0 (Monday) through 6 (Sunday)")
+        current = self._state.weekday_mask if self._state.weekday_mask is not None else 0x7F
+        bit = 1 << day_index
+        new_mask = (current | bit) if enabled else (current & ~bit)
+        self._state.weekday_mask = new_mask
+        self._notify_state_changed()
+        if self._ble_address:
+            return await self._write_schedule_to_device(weekday_mask=new_mask)
         return True
 
     async def set_intensity(self, intensity: int) -> bool:
@@ -1063,6 +1092,12 @@ class ScentDiffuserDevice:
                 )
                 self._state.schedule_custom_mode = resolved_mode
             elif isinstance(self._protocol, AromelyAroMaxProtocol):
+                slot = ScheduleSlot(
+                    start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
+                    enabled=enabled, work_seconds=work, pause_seconds=pause,
+                )
+                cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
+            elif isinstance(self._protocol, YooaiBleProtocol):
                 slot = ScheduleSlot(
                     start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
                     enabled=enabled, work_seconds=work, pause_seconds=pause,

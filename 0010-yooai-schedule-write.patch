@@ -1,0 +1,282 @@
+From a2b6d482ca7f4b879ee8aa7f5b7f01069d92e778 Mon Sep 17 00:00:00 2001
+From: temp <temp@temp.com>
+Date: Sat, 4 Jul 2026 18:16:21 +0000
+Subject: [PATCH] Implement schedule write for Yooai devices (schedule slot 0)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Decoded the schedule-write frame from the decompiled app
+(com.bumptech.glide.d.h0(), non-Grasse branch — matches this device
+family since it uses standard BleUtils.getBytes() framing everywhere
+else):
+
+  type=0x14, payload: [enabled(1)] [slot(1)] [weekday_mask LE16]
+  [start_min LE16] [stop_min LE16] [run_sec LE16] [pause_sec LE16]
+  [timer_id LE32]
+
+weekday_mask bit0..6 = Mon..Sun (confirmed via ModeWeekSetAdapter),
+bit7 auto-set when any day selected (mirrors the app). timer_id is a
+cloud-assigned field in the real app; using 0 since this device has no
+cloud account — untested whether the device validates it.
+
+New entities: 7 weekday switches (Mon-Sun) + Schedule Enabled switch.
+Re-enabled Start Time / End Time / Work Duration / Pause Duration,
+now wired through the existing generic _write_schedule_to_device()
+dispatcher via a new YooaiBleProtocol.build_schedule().
+---
+ custom_components/scent_assistant/device.py   | 35 ++++++++++++
+ custom_components/scent_assistant/number.py   | 14 ++---
+ .../scent_assistant/protocol_ble.py           | 53 ++++++++++++++++++
+ custom_components/scent_assistant/switch.py   | 55 ++++++++++++++++++-
+ custom_components/scent_assistant/time.py     |  4 --
+ 5 files changed, 146 insertions(+), 15 deletions(-)
+
+diff --git a/custom_components/scent_assistant/device.py b/custom_components/scent_assistant/device.py
+index c739a9d..4fc8e16 100644
+--- a/custom_components/scent_assistant/device.py
++++ b/custom_components/scent_assistant/device.py
+@@ -871,7 +871,17 @@ class ScentDiffuserDevice:
+         On V2 this method delegates to `set_power`, because V2's
+         firmware treats the schedule-enabled bit and the power
+         concept as the same toggle.
++
++        On Yooai devices, `enabled` is the schedule slot's own "enabled"
++        bit in its TimerVo (independent of Power) — re-push the schedule
++        the same way.
+         """
++        if isinstance(self._protocol, YooaiBleProtocol):
++            self._state.schedule_enabled = enabled
++            self._notify_state_changed()
++            if self._ble_address:
++                return await self._write_schedule_to_device(enabled=enabled)
++            return True
+         if not isinstance(self._protocol, ScentMarketingAkProtocol):
+             return False
+         if not self._protocol.is_v3:
+@@ -882,6 +892,25 @@ class ScentDiffuserDevice:
+             return await self._write_schedule_to_device(enabled=enabled)
+         return True
+ 
++    async def set_weekday(self, day_index: int, enabled: bool) -> bool:
++        """Toggle a single weekday (0=Monday..6=Sunday) in the active
++        schedule slot's weekday mask and push the schedule to the device.
++
++        Currently only wired up for Yooai devices; other protocols with
++        per-day scheduling are set as a full mask via the
++        `scent_assistant.set_schedule` service instead.
++        """
++        if not (0 <= day_index <= 6):
++            raise ValueError("day_index must be 0 (Monday) through 6 (Sunday)")
++        current = self._state.weekday_mask if self._state.weekday_mask is not None else 0x7F
++        bit = 1 << day_index
++        new_mask = (current | bit) if enabled else (current & ~bit)
++        self._state.weekday_mask = new_mask
++        self._notify_state_changed()
++        if self._ble_address:
++            return await self._write_schedule_to_device(weekday_mask=new_mask)
++        return True
++
+     async def set_intensity(self, intensity: int) -> bool:
+         """Set Scent Marketing AK spray intensity.
+ 
+@@ -1068,6 +1097,12 @@ class ScentDiffuserDevice:
+                     enabled=enabled, work_seconds=work, pause_seconds=pause,
+                 )
+                 cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
++            elif isinstance(self._protocol, YooaiBleProtocol):
++                slot = ScheduleSlot(
++                    start_hour=s_h, start_minute=s_m, end_hour=e_h, end_minute=e_m,
++                    enabled=enabled, work_seconds=work, pause_seconds=pause,
++                )
++                cmd = self._protocol.build_schedule(slot, weekday_mask=weekday_mask)
+ 
+             if cmd and await self._ble_execute(cmd):
+                 self._notify_state_changed()
+diff --git a/custom_components/scent_assistant/number.py b/custom_components/scent_assistant/number.py
+index 6fc408a..6755cd3 100644
+--- a/custom_components/scent_assistant/number.py
++++ b/custom_components/scent_assistant/number.py
+@@ -27,16 +27,10 @@ async def async_setup_entry(
+         async_add_entities([ScentimentLevelNumber(device, entry)])
+         return
+ 
+-    entities: list[NumberEntity] = []
+-    # Work/Pause Duration write a schedule slot — not implemented yet for
+-    # Yooai devices (the 5-mode "Working mode" schedule format hasn't been
+-    # decoded), so these would silently do nothing. Left out until that's
+-    # built rather than showing controls that don't work.
+-    if device.device_type != DeviceType.YOOAI_BLE:
+-        entities.extend([
+-            WorkDurationNumber(device, entry),
+-            PauseDurationNumber(device, entry),
+-        ])
++    entities: list[NumberEntity] = [
++        WorkDurationNumber(device, entry),
++        PauseDurationNumber(device, entry),
++    ]
+     if device.device_type == DeviceType.SCENT_MARKETING_AK:
+         entities.append(ScentMarketingIntensityNumber(device, entry))
+     if device.device_type == DeviceType.AROMA_LINK:
+diff --git a/custom_components/scent_assistant/protocol_ble.py b/custom_components/scent_assistant/protocol_ble.py
+index 9d641a5..39dcd14 100644
+--- a/custom_components/scent_assistant/protocol_ble.py
++++ b/custom_components/scent_assistant/protocol_ble.py
+@@ -2115,6 +2115,59 @@ class YooaiBleProtocol(BleProtocol):
+             self._build_frame(0x08),
+         ]
+ 
++    @staticmethod
++    def _u16le(value: int) -> bytes:
++        value &= 0xFFFF
++        return bytes([value & 0xFF, (value >> 8) & 0xFF])
++
++    @staticmethod
++    def _u32le(value: int) -> bytes:
++        value &= 0xFFFFFFFF
++        return bytes([
++            value & 0xFF, (value >> 8) & 0xFF,
++            (value >> 16) & 0xFF, (value >> 24) & 0xFF,
++        ])
++
++    def build_schedule(
++        self,
++        slot: ScheduleSlot,
++        weekday_mask: int,
++        timer_slot: int = 0,
++        timer_id: int = 0,
++    ) -> bytes:
++        """Write one schedule slot.
++
++        Decoded from the app's TimerVo -> BLE write path
++        (`com.bumptech.glide.d.h0()` in the obfuscated dex — the
++        non-"Grasse" branch, which matches this device family since it
++        uses the standard `BleUtils.getBytes()` framing everywhere
++        else). Confirmed field layout:
++
++            [enabled(1)] [slot(1)] [weekday_mask LE16] [start_min LE16]
++            [stop_min LE16] [run_sec LE16] [pause_sec LE16] [timer_id LE32]
++
++        wrapped in the standard frame with type=0x14 (20).
++
++        `weekday_mask` bit0..6 = Mon..Sun; the app always also sets bit7
++        when any day is selected (its "custom day pattern active" flag) —
++        replicated here rather than left to the caller.
++
++        `timer_id` is a cloud-assigned ID in the official app that this
++        offline integration has no equivalent for; 0 is untested but is
++        the only value that makes sense without a cloud account.
++        """
++        start_minutes = slot.start_hour * 60 + slot.start_minute
++        stop_minutes = slot.end_hour * 60 + slot.end_minute
++        week_byte = (weekday_mask & 0x7F) | (0x80 if weekday_mask & 0x7F else 0x00)
++        payload = bytes([1 if slot.enabled else 0, timer_slot & 0xFF])
++        payload += self._u16le(week_byte)
++        payload += self._u16le(start_minutes)
++        payload += self._u16le(stop_minutes)
++        payload += self._u16le(slot.work_seconds)
++        payload += self._u16le(slot.pause_seconds)
++        payload += self._u32le(timer_id)
++        return self._build_frame(0x14, payload)
++
+     def supports_fan(self) -> bool:
+         return True
+ 
+diff --git a/custom_components/scent_assistant/switch.py b/custom_components/scent_assistant/switch.py
+index d9b8a8a..f22fc71 100644
+--- a/custom_components/scent_assistant/switch.py
++++ b/custom_components/scent_assistant/switch.py
+@@ -56,6 +56,9 @@ async def async_setup_entry(
+     # now — not confirmed present on the NAMSTE SKU and untested.
+     if device.device_type == DeviceType.YOOAI_BLE and not is_cloud:
+         entities.append(DiffuserLockSwitch(device, entry))
++        entities.append(DiffuserScheduleSwitch(device, entry))
++        for day_index in range(7):
++            entities.append(DiffuserWeekdaySwitch(device, entry, day_index))
+ 
+     async_add_entities(entities)
+ 
+@@ -157,7 +160,11 @@ class DiffuserScheduleSwitch(SwitchEntity):
+ 
+     @property
+     def available(self) -> bool:
+-        # V3-only: V2 devices have no separate program toggle.
++        # V3-only for Scent Marketing AK (V2 has no separate program
++        # toggle); Yooai devices always have an independent schedule
++        # "enabled" bit.
++        if self._device.device_type == DeviceType.YOOAI_BLE:
++            return self._device.available
+         return self._device.available and self._device.protocol_is_v3
+ 
+     async def async_turn_on(self, **kwargs) -> None:
+@@ -167,6 +174,52 @@ class DiffuserScheduleSwitch(SwitchEntity):
+         await self._device.set_schedule_enabled(False)
+ 
+ 
++class DiffuserWeekdaySwitch(SwitchEntity):
++    """One weekday toggle (Monday..Sunday) in the active schedule slot.
++
++    Yooai-only for now — see `ScentDiffuserDevice.set_weekday`. Toggling
++    a day re-pushes the whole schedule slot with just that bit changed,
++    same pattern as the AK Program switch re-pushing with the enabled
++    bit changed.
++    """
++
++    _attr_has_entity_name = True
++    _attr_icon = "mdi:calendar-week"
++    _attr_entity_registry_enabled_default = True
++
++    _DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
++
++    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry, day_index: int) -> None:
++        self._device = device
++        self._day_index = day_index
++        self._attr_name = self._DAY_NAMES[day_index]
++        self._attr_unique_id = f"{device.unique_id}_weekday_{day_index}"
++        self._attr_device_info = device.device_info
++        device.register_state_callback(self._on_state_update)
++
++    def _on_state_update(self) -> None:
++        if self.hass is None:
++            return
++        self.async_write_ha_state()
++
++    @property
++    def is_on(self) -> bool | None:
++        mask = self._device.state.weekday_mask
++        if mask is None:
++            return None
++        return bool(mask & (1 << self._day_index))
++
++    @property
++    def available(self) -> bool:
++        return self._device.available
++
++    async def async_turn_on(self, **kwargs) -> None:
++        await self._device.set_weekday(self._day_index, True)
++
++    async def async_turn_off(self, **kwargs) -> None:
++        await self._device.set_weekday(self._day_index, False)
++
++
+ class DiffuserLampSwitch(SwitchEntity):
+     """Auxiliary LED / lamp switch (Scent Marketing AK family)."""
+ 
+diff --git a/custom_components/scent_assistant/time.py b/custom_components/scent_assistant/time.py
+index 366d085..01beda7 100644
+--- a/custom_components/scent_assistant/time.py
++++ b/custom_components/scent_assistant/time.py
+@@ -24,10 +24,6 @@ async def async_setup_entry(
+     device: ScentDiffuserDevice = hass.data[DOMAIN][entry.entry_id]
+     if device.device_type == DeviceType.SCENTIMENT:
+         return
+-    # Same reasoning as number.py: the schedule write format for Yooai
+-    # devices isn't decoded yet, so Start/End Time would be no-ops.
+-    if device.device_type == DeviceType.YOOAI_BLE:
+-        return
+ 
+     async_add_entities([
+         DiffuserStartTime(device, entry),
+-- 
+2.43.0
+

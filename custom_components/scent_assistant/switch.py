@@ -56,6 +56,9 @@ async def async_setup_entry(
     # now — not confirmed present on the NAMSTE SKU and untested.
     if device.device_type == DeviceType.YOOAI_BLE and not is_cloud:
         entities.append(DiffuserLockSwitch(device, entry))
+        entities.append(DiffuserScheduleSwitch(device, entry))
+        for day_index in range(7):
+            entities.append(DiffuserWeekdaySwitch(device, entry, day_index))
 
     async_add_entities(entities)
 
@@ -157,7 +160,11 @@ class DiffuserScheduleSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        # V3-only: V2 devices have no separate program toggle.
+        # V3-only for Scent Marketing AK (V2 has no separate program
+        # toggle); Yooai devices always have an independent schedule
+        # "enabled" bit.
+        if self._device.device_type == DeviceType.YOOAI_BLE:
+            return self._device.available
         return self._device.available and self._device.protocol_is_v3
 
     async def async_turn_on(self, **kwargs) -> None:
@@ -165,6 +172,52 @@ class DiffuserScheduleSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._device.set_schedule_enabled(False)
+
+
+class DiffuserWeekdaySwitch(SwitchEntity):
+    """One weekday toggle (Monday..Sunday) in the active schedule slot.
+
+    Yooai-only for now — see `ScentDiffuserDevice.set_weekday`. Toggling
+    a day re-pushes the whole schedule slot with just that bit changed,
+    same pattern as the AK Program switch re-pushing with the enabled
+    bit changed.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:calendar-week"
+    _attr_entity_registry_enabled_default = True
+
+    _DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry, day_index: int) -> None:
+        self._device = device
+        self._day_index = day_index
+        self._attr_name = self._DAY_NAMES[day_index]
+        self._attr_unique_id = f"{device.unique_id}_weekday_{day_index}"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
+
+    @property
+    def is_on(self) -> bool | None:
+        mask = self._device.state.weekday_mask
+        if mask is None:
+            return None
+        return bool(mask & (1 << self._day_index))
+
+    @property
+    def available(self) -> bool:
+        return self._device.available
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._device.set_weekday(self._day_index, True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._device.set_weekday(self._day_index, False)
 
 
 class DiffuserLampSwitch(SwitchEntity):

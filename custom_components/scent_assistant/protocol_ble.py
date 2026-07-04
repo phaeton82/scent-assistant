@@ -2115,6 +2115,59 @@ class YooaiBleProtocol(BleProtocol):
             self._build_frame(0x08),
         ]
 
+    @staticmethod
+    def _u16le(value: int) -> bytes:
+        value &= 0xFFFF
+        return bytes([value & 0xFF, (value >> 8) & 0xFF])
+
+    @staticmethod
+    def _u32le(value: int) -> bytes:
+        value &= 0xFFFFFFFF
+        return bytes([
+            value & 0xFF, (value >> 8) & 0xFF,
+            (value >> 16) & 0xFF, (value >> 24) & 0xFF,
+        ])
+
+    def build_schedule(
+        self,
+        slot: ScheduleSlot,
+        weekday_mask: int,
+        timer_slot: int = 0,
+        timer_id: int = 0,
+    ) -> bytes:
+        """Write one schedule slot.
+
+        Decoded from the app's TimerVo -> BLE write path
+        (`com.bumptech.glide.d.h0()` in the obfuscated dex — the
+        non-"Grasse" branch, which matches this device family since it
+        uses the standard `BleUtils.getBytes()` framing everywhere
+        else). Confirmed field layout:
+
+            [enabled(1)] [slot(1)] [weekday_mask LE16] [start_min LE16]
+            [stop_min LE16] [run_sec LE16] [pause_sec LE16] [timer_id LE32]
+
+        wrapped in the standard frame with type=0x14 (20).
+
+        `weekday_mask` bit0..6 = Mon..Sun; the app always also sets bit7
+        when any day is selected (its "custom day pattern active" flag) —
+        replicated here rather than left to the caller.
+
+        `timer_id` is a cloud-assigned ID in the official app that this
+        offline integration has no equivalent for; 0 is untested but is
+        the only value that makes sense without a cloud account.
+        """
+        start_minutes = slot.start_hour * 60 + slot.start_minute
+        stop_minutes = slot.end_hour * 60 + slot.end_minute
+        week_byte = (weekday_mask & 0x7F) | (0x80 if weekday_mask & 0x7F else 0x00)
+        payload = bytes([1 if slot.enabled else 0, timer_slot & 0xFF])
+        payload += self._u16le(week_byte)
+        payload += self._u16le(start_minutes)
+        payload += self._u16le(stop_minutes)
+        payload += self._u16le(slot.work_seconds)
+        payload += self._u16le(slot.pause_seconds)
+        payload += self._u32le(timer_id)
+        return self._build_frame(0x14, payload)
+
     def supports_fan(self) -> bool:
         return True
 

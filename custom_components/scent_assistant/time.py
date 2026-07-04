@@ -24,10 +24,6 @@ async def async_setup_entry(
     device: ScentDiffuserDevice = hass.data[DOMAIN][entry.entry_id]
     if device.device_type == DeviceType.SCENTIMENT:
         return
-    # Same reasoning as number.py: the schedule write format for Yooai
-    # devices isn't decoded yet, so Start/End Time would be no-ops.
-    if device.device_type == DeviceType.YOOAI_BLE:
-        return
 
     async_add_entities([
         DiffuserStartTime(device, entry),
